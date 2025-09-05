@@ -1,0 +1,32 @@
+from unsloth import FastLanguageModel
+from transformers import TextStreamer
+
+MODEL_ID = "unsloth/gpt-oss-20b-unsloth-bnb-4bit"
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name = MODEL_ID,
+    dtype = None,
+    max_seq_length = 4096,
+    load_in_4bit = False,        
+    full_finetuning = False,
+    trust_remote_code = True,
+)
+FastLanguageModel.for_inference(model)
+
+
+messages = [
+    {"role": "user", "content":
+    """
+    helo 
+
+ """},
+]
+inputs = tokenizer.apply_chat_template(
+    messages,
+    add_generation_prompt = True,
+    return_tensors = "pt",
+    return_dict = True,
+    reasoning_effort = "medium", # **NEW!** Set reasoning effort to low, medium or high
+).to(model.device)
+
+_ = model.generate(**inputs, max_new_tokens = 32000, streamer = TextStreamer(tokenizer))

@@ -1,0 +1,11 @@
+doc-0#0 Q0 doc-0-ch0 1 13.539049 bm25_d
+doc-0#1 Q0 doc-0-ch0 1 17.111082 bm25_d
+doc-0#1 Q0 doc-0-ch1 2 16.483478 bm25_d
+doc-0#2 Q0 doc-0-ch1 1 13.243260 bm25_d
+doc-0#2 Q0 doc-0-ch2 2 10.765669 bm25_d
+doc-0#3 Q0 doc-0-ch3 1 24.061389 bm25_d
+doc-0#3 Q0 doc-0-ch2 2 23.206623 bm25_d
+doc-0#4 Q0 doc-0-ch4 1 12.248244 bm25_d
+doc-0#4 Q0 doc-0-ch3 2 12.067171 bm25_d
+doc-0#5 Q0 doc-0-ch4 1 17.380958 bm25_d
+doc-0#5 Q0 doc-0-ch5 2 15.245240 bm25_d

@@ -1,0 +1,6 @@
+{"qid": "doc-0#0", "text": "The BEIR dataset is a large, heterogeneous benchmark for Information Retrieval (IR),"}
+{"qid": "doc-0#1", "text": "data and benchmarks similar to the mono lingual BEIR (Thakur et al.,"}
+{"qid": "doc-0#2", "text": "with lexical BM25 retrieval. • Wedemonstrated that both the BEIR-PL and original"}
+{"qid": "doc-0#3", "text": "e.g., TF.IDFor BM25(RobertsonandZaragoza,2009),havedom inatedtextual IRformanyyears. Mainlydueto manageablecomputationalcost,butstilloffering decent performance. Recently, astrong trend"}
+{"qid": "doc-0#4", "text": "FiQa Q. HotpotQA Q. HotpotQA C. MSMARCOC. MSMARCOQ. SciFact Q. Quora Q."}
+{"qid": "doc-0#5", "text": "rely on Google Translate service. tions used to evaluate the performance of"}
