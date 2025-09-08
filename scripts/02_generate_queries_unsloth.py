@@ -13,29 +13,6 @@ MODEL_ID_DEFAULT = "unsloth/gpt-oss-20b-unsloth-bnb-4bit"
 
 
 
-def extract_question_from_output(text: str) -> str:
-    # bỏ block phân tích
-    text = re.sub(r"(?s)<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|(?:end|return)\|>", "", text)
-    # ưu tiên lấy phần assistant final
-    m = re.search(r"(?s)<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|(?:end|return)\|>", text)
-    segment = m.group(1) if m else text
-    # loại toàn bộ thẻ
-    segment = re.sub(r"<\|[^|]+\|>", "", segment)
-    # loại nhãn/lời dẫn reasoning phổ biến
-    segment = re.sub(r"(?im)^\s*(thinking|thoughts)\s*:.*$", "", segment)
-    # chọn câu hỏi hợp lệ
-    for ln in segment.splitlines():
-        s = ln.strip().lstrip("-•*").strip()
-        if 3 <= len(s) <= 200 and s.endswith("?"):
-            return s
-    # fallback: dòng không rỗng đầu tiên
-    for ln in segment.splitlines():
-        s = ln.strip()
-        if s:
-            return s
-    return "Câu hỏi gì được trả lời bởi đoạn trên?"
-
-
 def read_jsonl(path: Path) -> Iterable[Dict]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
@@ -83,7 +60,9 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
 
     lines: List[str] = []
     for _ in range(num):
-        messages = [{"role": "user", "content": prompt}]
+        messages = [
+            {"role": "user", "content": prompt},
+        ]
         inputs = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -103,9 +82,26 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
                 streamer=streamer,
             )
         decoded = tokenizer.batch_decode(out, skip_special_tokens=True)
-        joined = "\n".join(decoded)
-        q = extract_question_from_output(joined)
-        lines.append(q)
+
+        extracted: List[str] = []
+        for d in decoded:
+            m = re.search(r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|return\|>", d, flags=re.S)
+            if m:
+                segment = m.group(1).strip()
+                # lấy dòng hỏi đầu tiên
+                for ln in segment.split("\n"):
+                    s = ln.strip()
+                    if s:
+                        extracted.append(s)
+                        break
+            else:
+                for ln in d.split("\n"):
+                    s = ln.strip().lstrip("-•*").strip()
+                    if 3 <= len(s) <= 200 and s.endswith("?"):
+                        extracted.append(s)
+                        break
+        if extracted:
+            lines.append(extracted[0])
         if len(lines) >= num:
             break
 
@@ -131,7 +127,6 @@ def main() -> None:
     out_queries = Path(args.out_queries)
     out_qrels = Path(args.out_qrels)
 
-    # Khởi tạo model theo phong cách code gốc (bám sát mẫu)
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         dtype=None,
