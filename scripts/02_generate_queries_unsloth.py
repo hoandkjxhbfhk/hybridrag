@@ -89,7 +89,7 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
             add_generation_prompt=True,
             return_tensors="pt",
             return_dict=True,
-            reasoning_effort="medium",
+            reasoning_effort="low",
         )
         inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
 
