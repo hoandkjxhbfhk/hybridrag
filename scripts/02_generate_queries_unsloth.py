@@ -72,6 +72,7 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
                 max_new_tokens=max_new_tokens,
                 num_return_sequences=1,  # bắt buộc với Unsloth assisted
             )
+            print(out)
         decoded.extend(tokenizer.batch_decode(out, skip_special_tokens=True))
 
     lines: List[str] = []
