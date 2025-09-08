@@ -1,0 +1,6 @@
+fusion: [normalized_sum, rrf, weighted_sum_mor_pre, weighted_sum_mor_post]
+topk_list: [10, 50]
+kmeans_k_list: [4, 8]
+abc_list:
+  - {a: 0.1, b: 0.3, c: 0.6}
+  - {a: 0.2, b: 0.3, c: 0.5}
