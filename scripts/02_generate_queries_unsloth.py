@@ -7,8 +7,33 @@ from typing import Dict, Iterable, List, Tuple
 
 from unsloth import FastLanguageModel
 from transformers import TextStreamer
+import re
 
 MODEL_ID_DEFAULT = "unsloth/gpt-oss-20b-unsloth-bnb-4bit"
+
+
+
+def extract_question_from_output(text: str) -> str:
+    # bỏ block phân tích
+    text = re.sub(r"(?s)<\|start\|>assistant<\|channel\|>analysis<\|message\|>.*?<\|(?:end|return)\|>", "", text)
+    # ưu tiên lấy phần assistant final
+    m = re.search(r"(?s)<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|(?:end|return)\|>", text)
+    segment = m.group(1) if m else text
+    # loại toàn bộ thẻ
+    segment = re.sub(r"<\|[^|]+\|>", "", segment)
+    # loại nhãn/lời dẫn reasoning phổ biến
+    segment = re.sub(r"(?im)^\s*(thinking|thoughts)\s*:.*$", "", segment)
+    # chọn câu hỏi hợp lệ
+    for ln in segment.splitlines():
+        s = ln.strip().lstrip("-•*").strip()
+        if 3 <= len(s) <= 200 and s.endswith("?"):
+            return s
+    # fallback: dòng không rỗng đầu tiên
+    for ln in segment.splitlines():
+        s = ln.strip()
+        if s:
+            return s
+    return "Câu hỏi gì được trả lời bởi đoạn trên?"
 
 
 def read_jsonl(path: Path) -> Iterable[Dict]:
@@ -58,9 +83,7 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
 
     lines: List[str] = []
     for _ in range(num):
-        messages = [
-            {"role": "user", "content": prompt},
-        ]
+        messages = [{"role": "user", "content": prompt}]
         inputs = tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
@@ -68,7 +91,6 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
             return_dict=True,
             reasoning_effort="medium",
         )
-        # Đồng bộ device
         inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
 
         streamer = TextStreamer(tokenizer)
@@ -81,12 +103,9 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
                 streamer=streamer,
             )
         decoded = tokenizer.batch_decode(out, skip_special_tokens=True)
-        for d in decoded:
-            for ln in d.split("\n"):
-                s = ln.strip().lstrip("-•*").strip()
-                if 3 <= len(s) <= 200:
-                    lines.append(s)
-                    break  # lấy câu đầu hợp lệ cho mỗi lần generate
+        joined = "\n".join(decoded)
+        q = extract_question_from_output(joined)
+        lines.append(q)
         if len(lines) >= num:
             break
 
