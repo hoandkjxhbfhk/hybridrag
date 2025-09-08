@@ -6,7 +6,14 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import json
 import numpy as np
+
+try:
+    import ranx
+    HAS_RANX = True
+except Exception:
+    HAS_RANX = False
 
 
 RunRow = Tuple[str, str, int, float, str]  # qid, docid, rank, score, run
@@ -78,6 +85,39 @@ def rrf_fusion(runs: Dict[str, Dict[str, List[Tuple[str, float]]]], topk: int, k
     return out
 
 
+def weighted_sum_mor_pre(runs: Dict[str, Dict[str, List[Tuple[str, float]]]], weights_path: Path, topk: int) -> Dict[str, List[Tuple[str, float]]]:
+    weights = json.loads(weights_path.read_text(encoding="utf-8"))
+    # runs: run_name -> {qid -> [(docid, score), ...]}
+    fused: Dict[str, Dict[str, float]] = collections.defaultdict(lambda: collections.defaultdict(float))
+    for run_name, per_q in runs.items():
+        wmap: Dict[str, float] = weights.get(run_name, {})
+        for qid, pairs in per_q.items():
+            w = float(wmap.get(qid, 0.5))
+            for docid, score in pairs:
+                fused[qid][docid] += w * float(score)
+    out: Dict[str, List[Tuple[str, float]]] = {}
+    for qid, doc_scores in fused.items():
+        items = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:topk]
+        out[qid] = items
+    return out
+
+
+def weighted_sum_with_weights(runs: Dict[str, Dict[str, List[Tuple[str, float]]]], weights_path: Path, topk: int) -> Dict[str, List[Tuple[str, float]]]:
+    weights = json.loads(weights_path.read_text(encoding="utf-8"))
+    fused: Dict[str, Dict[str, float]] = collections.defaultdict(lambda: collections.defaultdict(float))
+    for run_name, per_q in runs.items():
+        wmap: Dict[str, float] = weights.get(run_name, {})
+        for qid, pairs in per_q.items():
+            w = float(wmap.get(qid, 0.5))
+            for docid, score in pairs:
+                fused[qid][docid] += w * float(score)
+    out: Dict[str, List[Tuple[str, float]]] = {}
+    for qid, doc_scores in fused.items():
+        items = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:topk]
+        out[qid] = items
+    return out
+
+
 def dcg(scores: List[int]) -> float:
     return sum((rel / np.log2(idx + 2)) for idx, rel in enumerate(scores))
 
@@ -90,6 +130,23 @@ def ndcg_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float
 
 
 def evaluate_ndcg(qrels: Dict[str, Dict[str, int]], fused: Dict[str, List[Tuple[str, float]]], k_list=(5, 20)) -> Dict[int, float]:
+    if HAS_RANX:
+        # Chuyển sang format ranx
+        qrels_ranx = ranx.Qrels()
+        for qid, d in qrels.items():
+            for did, rel in d.items():
+                qrels_ranx.add_qrel(qid, did, rel)
+        results = {}
+        for k in k_list:
+            run = ranx.Run()
+            for qid, pairs in fused.items():
+                for rank, (did, score) in enumerate(pairs, start=1):
+                    run.add_score(qid, did, float(score))
+            m = ranx.evaluate(qrels=qrels_ranx, runs={"fused": run}, metrics=[f"ndcg@{k}"])
+            results[k] = float(m["fused"][f"ndcg@{k}"])
+        return results
+
+    # Fallback tự tính
     agg: Dict[int, List[float]] = {k: [] for k in k_list}
     for qid, pairs in fused.items():
         ranked = [docid for docid, _ in pairs]
@@ -102,7 +159,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fuse run files and evaluate NDCG@5/20")
     parser.add_argument("--qrels", type=str, required=True)
     parser.add_argument("--runs", type=str, required=True)
-    parser.add_argument("--fusion", nargs="+", default=["normalized_sum", "rrf"])
+    parser.add_argument("--fusion", nargs="+", default=["normalized_sum", "rrf", "weighted_sum_mor_pre", "weighted_sum_mor_post"])  # include mor_post
     parser.add_argument("--weights", type=str, default="weights")
     parser.add_argument("--out", type=str, default="fusion")
     parser.add_argument("--topk", type=int, default=100)
@@ -119,8 +176,13 @@ def main() -> None:
             fused = normalized_sum_fusion(runs, topk=args.topk)
         elif method == "rrf":
             fused = rrf_fusion(runs, topk=args.topk)
+        elif method == "weighted_sum_mor_pre":
+            weights_path = Path(args.weights) / "mor_pre.json"
+            fused = weighted_sum_mor_pre(runs, weights_path, topk=args.topk)
+        elif method == "weighted_sum_mor_post":
+            weights_path = Path(args.weights) / "mor_post.json"
+            fused = weighted_sum_with_weights(runs, weights_path, topk=args.topk)
         else:
-            # placeholder cho weighted_sum_mor_pre/post
             fused = normalized_sum_fusion(runs, topk=args.topk)
 
         # ghi run hợp nhất

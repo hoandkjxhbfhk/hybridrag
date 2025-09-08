@@ -1,0 +1,4 @@
+fusion,ndcg5,ndcg20
+normalized_sum,0.7206,0.7206
+rrf,0.8155,0.8155
+weighted_sum_mor_pre,0.8155,0.8155
