@@ -56,24 +56,30 @@ def build_subq_prompt(query_text: str, num: int) -> str:
 
 
 def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, temperature: float) -> List[str]:
+    import torch
+    device = next(model.parameters()).device
     inputs = tokenizer([prompt], return_tensors="pt")
-    streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-    outputs = model.generate(
-        **inputs,
-        do_sample=True,
-        temperature=temperature,
-        max_new_tokens=max_new_tokens,
-        num_return_sequences=num,
-        streamer=None,  # đặt None để không in ra STDOUT; dùng streamer nếu muốn stream
-    )
-    decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    decoded: List[str] = []
+    for _ in range(num):
+        with torch.inference_mode():
+            out = model.generate(
+                **inputs,
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.95,
+                max_new_tokens=max_new_tokens,
+                num_return_sequences=1,  # bắt buộc với Unsloth assisted
+            )
+        decoded.extend(tokenizer.batch_decode(out, skip_special_tokens=True))
+
     lines: List[str] = []
     for d in decoded:
         for ln in d.split("\n"):
             s = ln.strip().lstrip("-•*").strip()
             if 3 <= len(s) <= 200:
                 lines.append(s)
-    # Lấy đúng num phần tử, bổ sung nếu thiếu
     while len(lines) < num:
         lines.append(lines[-1] if lines else "Câu hỏi gì được trả lời bởi đoạn trên?")
     return lines[:num]
