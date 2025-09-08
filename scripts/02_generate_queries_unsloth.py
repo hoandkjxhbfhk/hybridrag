@@ -35,54 +35,63 @@ def write_qrels(rows: List[Tuple[str, str, int]], path: Path) -> None:
             f.write(f"{qid}\t{pid}\t{score}\n")
 
 
-def build_query_prompt(text: str, num: int) -> str:
+def build_query_prompt(text: str) -> str:
     return (
         "Bạn là trợ lý tạo câu hỏi tìm kiếm.\n"
-        f"Viết {num} câu hỏi ngắn bằng tiếng Việt mà đoạn sau trả lời trực tiếp.\n"
-        "- Chỉ in danh sách câu hỏi, mỗi dòng một câu.\n"
-        "- Không giải thích, không đánh số.\n\n"
+        "Viết 1 câu hỏi ngắn bằng tiếng Việt mà đoạn sau trả lời trực tiếp.\n"
+        "- Chỉ in câu hỏi duy nhất, không đánh số, không giải thích.\n\n"
         f"Đoạn văn:\n{text}\n"
     )
 
 
-def build_subq_prompt(query_text: str, num: int) -> str:
+def build_subq_prompt(query_text: str) -> str:
     return (
         "Bạn là trợ lý phân rã câu hỏi.\n"
-        f"Hãy phân rã câu sau thành {num} câu hỏi con ngắn gọn, cụ thể.\n"
-        "- Chỉ in danh sách câu hỏi con, mỗi dòng một câu.\n"
-        "- Không giải thích, không đánh số.\n\n"
+        "Hãy tạo 1 câu hỏi con ngắn gọn, cụ thể từ câu sau.\n"
+        "- Chỉ in câu hỏi, không giải thích.\n\n"
         f"Câu hỏi:\n{query_text}\n"
     )
 
 
 def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, temperature: float) -> List[str]:
     import torch
-    device = next(model.parameters()).device
-    inputs = tokenizer([prompt], return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    decoded: List[str] = []
+    lines: List[str] = []
     for _ in range(num):
+        messages = [
+            {"role": "user", "content": prompt},
+        ]
+        inputs = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            reasoning_effort="medium",
+        )
+        # Đồng bộ device
+        inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
+
+        streamer = TextStreamer(tokenizer)
         with torch.inference_mode():
             out = model.generate(
                 **inputs,
                 do_sample=True,
                 temperature=temperature,
-                top_p=0.95,
                 max_new_tokens=max_new_tokens,
-                num_return_sequences=1,  # bắt buộc với Unsloth assisted
+                streamer=streamer,
             )
-            print(out)
-        decoded.extend(tokenizer.batch_decode(out, skip_special_tokens=True))
+        decoded = tokenizer.batch_decode(out, skip_special_tokens=True)
+        for d in decoded:
+            for ln in d.split("\n"):
+                s = ln.strip().lstrip("-•*").strip()
+                if 3 <= len(s) <= 200:
+                    lines.append(s)
+                    break  # lấy câu đầu hợp lệ cho mỗi lần generate
+        if len(lines) >= num:
+            break
 
-    lines: List[str] = []
-    for d in decoded:
-        for ln in d.split("\n"):
-            s = ln.strip().lstrip("-•*").strip()
-            if 3 <= len(s) <= 200:
-                lines.append(s)
     while len(lines) < num:
-        lines.append(lines[-1] if lines else "Câu hỏi gì được trả lời bởi đoạn trên?")
+        lines.append("Câu hỏi gì được trả lời bởi đoạn trên?")
     return lines[:num]
 
 
@@ -97,19 +106,20 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--max-seq-len", type=int, default=4096)
-    parser.add_argument("--no-4bit", action="store_true")
     args = parser.parse_args()
 
     corpus_path = Path(args.corpus)
     out_queries = Path(args.out_queries)
     out_qrels = Path(args.out_qrels)
 
-    # Khởi tạo model theo phong cách code gốc
+    # Khởi tạo model theo phong cách code gốc (bám sát mẫu)
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
+        dtype=None,
         max_seq_length=args.max_seq_len,
-        dtype=None,  # để Unsloth tự chọn (fp16/bf16 nếu có GPU)
-        load_in_4bit=not args.no_4bit,
+        load_in_4bit=False,
+        full_finetuning=False,
+        trust_remote_code=True,
     )
     FastLanguageModel.for_inference(model)
 
@@ -123,7 +133,7 @@ def main() -> None:
         base_qid_prefix = f"{base_id}#"
 
         if args.mode in ("q", "both"):
-            prompt_q = build_query_prompt(text, args.per_doc)
+            prompt_q = build_query_prompt(text)
             qs = generate_list(
                 model,
                 tokenizer,
@@ -138,8 +148,8 @@ def main() -> None:
                 qrels_rows.append((qid, pid, 1))
 
         if args.mode in ("sq", "both"):
-            seed_q = queries_out[-1]["text"] if queries_out else text[:160]
-            prompt_sq = build_subq_prompt(seed_q, args.per_doc)
+            seed_q = queries_out[-1]["text"] if queries_out else text[:]
+            prompt_sq = build_subq_prompt(seed_q)
             sqs = generate_list(
                 model,
                 tokenizer,
