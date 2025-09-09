@@ -85,21 +85,41 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
 
         extracted: List[str] = []
         for d in decoded:
-            m = re.search(r"<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|return\|>", d, flags=re.S)
+            # 1) Try to capture the assistant final segment when special tokens survive
+            m = re.search(r"<\|start\|>assistant(?:<\|channel\|>final)?<\|message\|>(.*?)<\|return\|>", d, flags=re.S)
+            segment: str
             if m:
                 segment = m.group(1).strip()
-                # lấy dòng hỏi đầu tiên
-                for ln in segment.split("\n"):
-                    s = ln.strip()
-                    if s:
-                        extracted.append(s)
-                        break
             else:
-                for ln in d.split("\n"):
-                    s = ln.strip().lstrip("-•*").strip()
-                    if 3 <= len(s) <= 200 and s.endswith("?"):
-                        extracted.append(s)
-                        break
+                # 2) When special tokens are stripped, Unsloth templates often collapse to
+                #    'assistantanalysis... assistantfinal...'. Keep only the final content
+                #    and drop any analysis content.
+                tmp = re.sub(r"(?:^|\n)assistantanalysis.*?(?=(?:^|\n)assistantfinal|$)", "", d, flags=re.S)
+                if "assistantfinal" in tmp:
+                    segment = tmp.split("assistantfinal", 1)[1]
+                else:
+                    segment = tmp
+
+            # From the chosen segment, pick the first plausible question line
+            picked = None
+            for ln in segment.split("\n"):
+                s = ln.strip()
+                if not s:
+                    continue
+                # Remove common list markers and role leftovers
+                s = s.lstrip("-•*:").strip()
+                s = re.sub(r"^assistant(?:<\|channel\|>)?(?:final|analysis)\s*", "", s, flags=re.I)
+                s = s.strip("\"'“”")
+                if 3 <= len(s) <= 200 and s.endswith("?"):
+                    picked = s
+                    break
+            if not picked:
+                # As a fallback, search any question-like substring
+                m2 = re.search(r"([^\n\r\?]{3,200}\?)", segment)
+                if m2:
+                    picked = m2.group(1).strip().strip("\"'“”")
+            if picked:
+                extracted.append(picked)
         if extracted:
             lines.append(extracted[0])
         if len(lines) >= num:
