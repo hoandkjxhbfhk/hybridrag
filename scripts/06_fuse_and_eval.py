@@ -9,11 +9,7 @@ from typing import Dict, List, Tuple
 import json
 import numpy as np
 
-try:
-    import ranx
-    HAS_RANX = True
-except Exception:
-    HAS_RANX = False
+HAS_RANX = False
 
 
 RunRow = Tuple[str, str, int, float, str]  # qid, docid, rank, score, run
