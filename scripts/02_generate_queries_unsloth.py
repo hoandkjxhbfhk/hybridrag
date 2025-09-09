@@ -81,7 +81,10 @@ def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
                 max_new_tokens=max_new_tokens,
                 streamer=streamer,
             )
-        decoded = tokenizer.batch_decode(out, skip_special_tokens=True)
+        # Decode only newly generated tokens to avoid including the prompt/template
+        start = inputs["input_ids"].shape[-1]
+        gen_only = out[0, start:]
+        decoded = [tokenizer.decode(gen_only, skip_special_tokens=True)]
 
         extracted: List[str] = []
         for d in decoded:
