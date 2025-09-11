@@ -204,7 +204,7 @@ def main() -> None:
         denom = (mx - mn) if mx > mn else 1.0
         norm_scores = (scores - mn) / denom
         for qid, s in zip(qids, norm_scores):
-            wd = float(np.clip(s, 0.2, 0.8))  # clip để tránh cực trị
+            wd = float(np.clip(s, 0.2, 0.6))  # clip để tránh cực trị
             wb = float(1.0 - wd)
             weights_pre["dense_mpnet_d"][qid] = wd
             weights_pre["bm25_d"][qid] = wb
