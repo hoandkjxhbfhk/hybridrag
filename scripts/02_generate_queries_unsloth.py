@@ -14,12 +14,19 @@ MODEL_ID_DEFAULT = "unsloth/gpt-oss-20b-unsloth-bnb-4bit"
 
 
 def read_jsonl(path: Path) -> Iterable[Dict]:
+    import json
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+        for i, raw in enumerate(f, start=1):
+            line = raw.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as e:
+                snippet = (line[:200] + "...") if len(line) > 200 else line
+                raise SystemExit(
+                    f"Invalid JSON at {path}:{i}: {e}\nSnippet: {snippet}"
+                )
 
 
 def write_jsonl(records: List[Dict], path: Path) -> None:
@@ -116,12 +123,15 @@ def generate_many(model, tokenizer, prompt: str, num: int, max_new_tokens: int, 
     )
     inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
 
+    # Keep streaming to stdout as feedback during generation
+    streamer = TextStreamer(tokenizer)
     with torch.inference_mode():
         out = model.generate(
             **inputs,
             do_sample=True,
             temperature=temperature,
             max_new_tokens=max_new_tokens,
+            streamer=streamer,
         )
     # Decode only newly generated tokens to avoid including the prompt/template
     start = inputs["input_ids"].shape[-1]
