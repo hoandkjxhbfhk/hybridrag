@@ -67,7 +67,7 @@ def retrieve_dense(index_dir: Path, model_alias: str, query_text: str, topk: int
         if a in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
             return "sentence-transformers/msmarco-bert-base-dot-v5"
         if a in ("ance", "msmarco-ance"):
-            return "sentence-transformers/msmarco-bert-base-dot-v5"
+            return "sentence-transformers/msmarco-roberta-base-ance-firstp"
         if a in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
             return "princeton-nlp/sup-simcse-roberta-base"
         return alias
