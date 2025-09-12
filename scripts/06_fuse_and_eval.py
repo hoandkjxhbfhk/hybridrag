@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 import json
 import numpy as np
 
+# Try to enable ranx if available for metrics
 HAS_RANX = False
 
 
@@ -124,41 +125,114 @@ def ndcg_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float
     idcg = dcg(ideal)
     return (dcg(gains) / idcg) if idcg > 0 else 0.0
 
+def precision_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float:
+    if k <= 0:
+        return 0.0
+    preds = ranked_docs[:k]
+    if not preds:
+        return 0.0
+    rel_set = {d for d, r in true_rel.items() if r > 0}
+    hit = sum(1 for d in preds if d in rel_set)
+    return hit / float(k)
 
-def evaluate_ndcg(qrels: Dict[str, Dict[str, int]], fused: Dict[str, List[Tuple[str, float]]], k_list=(5, 20)) -> Dict[int, float]:
+
+def recall_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float:
+    rel_set = {d for d, r in true_rel.items() if r > 0}
+    if not rel_set:
+        return 0.0
+    preds = ranked_docs[:k]
+    hit = sum(1 for d in preds if d in rel_set)
+    return hit / float(len(rel_set))
+
+
+def ap_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float:
+    rel_set = {d for d, r in true_rel.items() if r > 0}
+    if not rel_set:
+        return 0.0
+    ap = 0.0
+    hit = 0
+    for i, d in enumerate(ranked_docs[:k], start=1):
+        if d in rel_set:
+            hit += 1
+            ap += hit / float(i)
+    return ap / float(min(len(rel_set), k))
+
+
+def mrr_at_k(true_rel: Dict[str, int], ranked_docs: List[str], k: int) -> float:
+    rel_set = {d for d, r in true_rel.items() if r > 0}
+    for i, d in enumerate(ranked_docs[:k], start=1):
+        if d in rel_set:
+            return 1.0 / float(i)
+    return 0.0
+
+
+def evaluate_all_metrics(
+    qrels: Dict[str, Dict[str, int]],
+    fused: Dict[str, List[Tuple[str, float]]],
+    k_list=(5, 20),
+) -> Dict[str, Dict[int, float]]:
+    metrics: Dict[str, Dict[int, float]] = {
+        "ndcg": {},
+        "precision": {},
+        "recall": {},
+        "map": {},
+        "mrr": {},
+    }
+
     if HAS_RANX:
-        # Chuyển sang format ranx
-        qrels_ranx = ranx.Qrels()
+        rq = ranx.Qrels()
         for qid, d in qrels.items():
             for did, rel in d.items():
-                qrels_ranx.add_qrel(qid, did, rel)
-        results = {}
+                rq.add_qrel(qid, did, rel)
+        run = ranx.Run()
+        for qid, pairs in fused.items():
+            for _, (did, score) in enumerate(pairs):
+                run.add_score(qid, did, float(score))
+        metric_names = []
         for k in k_list:
-            run = ranx.Run()
-            for qid, pairs in fused.items():
-                for rank, (did, score) in enumerate(pairs, start=1):
-                    run.add_score(qid, did, float(score))
-            m = ranx.evaluate(qrels=qrels_ranx, runs={"fused": run}, metrics=[f"ndcg@{k}"])
-            results[k] = float(m["fused"][f"ndcg@{k}"])
-        return results
+            metric_names.extend([f"ndcg@{k}", f"precision@{k}", f"recall@{k}", f"map@{k}", f"mrr@{k}"])
+        res = ranx.evaluate(qrels=rq, runs={"fused": run}, metrics=metric_names)
+        for k in k_list:
+            metrics["ndcg"][k] = float(res["fused"][f"ndcg@{k}"])
+            metrics["precision"][k] = float(res["fused"][f"precision@{k}"])
+            metrics["recall"][k] = float(res["fused"][f"recall@{k}"])
+            metrics["map"][k] = float(res["fused"][f"map@{k}"])
+            metrics["mrr"][k] = float(res["fused"][f"mrr@{k}"])
+        return metrics
 
-    # Fallback tự tính
-    agg: Dict[int, List[float]] = {k: [] for k in k_list}
-    for qid, pairs in fused.items():
-        ranked = [docid for docid, _ in pairs]
-        for k in k_list:
-            agg[k].append(ndcg_at_k(qrels.get(qid, {}), ranked, k))
-    return {k: (float(np.mean(v)) if v else 0.0) for k, v in agg.items()}
+    # Fallback: tự tính trung bình theo truy vấn
+    for k in k_list:
+        vals_ndcg: List[float] = []
+        vals_p: List[float] = []
+        vals_r: List[float] = []
+        vals_ap: List[float] = []
+        vals_mrr: List[float] = []
+        for qid, pairs in fused.items():
+            ranked = [docid for docid, _ in pairs]
+            tr = qrels.get(qid, {})
+            vals_ndcg.append(ndcg_at_k(tr, ranked, k))
+            vals_p.append(precision_at_k(tr, ranked, k))
+            vals_r.append(recall_at_k(tr, ranked, k))
+            vals_ap.append(ap_at_k(tr, ranked, k))
+            vals_mrr.append(mrr_at_k(tr, ranked, k))
+        metrics["ndcg"][k] = float(np.mean(vals_ndcg)) if vals_ndcg else 0.0
+        metrics["precision"][k] = float(np.mean(vals_p)) if vals_p else 0.0
+        metrics["recall"][k] = float(np.mean(vals_r)) if vals_r else 0.0
+        metrics["map"][k] = float(np.mean(vals_ap)) if vals_ap else 0.0
+        metrics["mrr"][k] = float(np.mean(vals_mrr)) if vals_mrr else 0.0
+    return metrics
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fuse run files and evaluate NDCG@5/20")
+    parser = argparse.ArgumentParser(description="Fuse run files and evaluate metrics (NDCG, P, R, MAP, MRR)")
     parser.add_argument("--qrels", type=str, required=True)
     parser.add_argument("--runs", type=str, required=True)
     parser.add_argument("--fusion", nargs="+", default=["normalized_sum", "rrf", "weighted_sum_mor_pre", "weighted_sum_mor_post"])  # include mor_post
     parser.add_argument("--weights", type=str, default="weights")
     parser.add_argument("--out", type=str, default="fusion")
     parser.add_argument("--topk", type=int, default=100)
+    parser.add_argument("--k-list", type=str, default="5,20", help="Comma-separated cutoffs to report metrics at")
+    parser.add_argument("--metrics-csv", type=str, default="", help="Optional path to write a CSV of metrics")
     args = parser.parse_args()
 
     qrels = read_qrels(Path(args.qrels))
@@ -166,6 +240,10 @@ def main() -> None:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    k_list = [int(x) for x in args.k_list.split(",") if x.strip()]
+
+    results_rows = []
 
     for method in args.fusion:
         if method == "normalized_sum":
@@ -191,8 +269,37 @@ def main() -> None:
             for qid, docid, rank, score, runname in run_rows:
                 f.write(f"{qid} Q0 {docid} {rank} {score:.6f} {runname}\n")
 
-        ndcgs = evaluate_ndcg(qrels, fused, k_list=(5, 20))
-        print(f"{method}: Average NDCG@5={ndcgs[5]:.4f}, NDCG@20={ndcgs[20]:.4f}")
+        metrics = evaluate_all_metrics(qrels, fused, k_list=tuple(k_list))
+        # Print concise summary for requested cutoffs
+        parts = [f"{method}:"]
+        for k in k_list:
+            parts.append(
+                f"@{k} NDCG={metrics['ndcg'][k]:.4f} P={metrics['precision'][k]:.4f} R={metrics['recall'][k]:.4f} MAP={metrics['map'][k]:.4f} MRR={metrics['mrr'][k]:.4f}"
+            )
+        print(" ".join(parts))
+
+        # collect rows for CSV
+        for k in k_list:
+            results_rows.append({
+                "method": method,
+                "k": k,
+                "ndcg": metrics['ndcg'][k],
+                "precision": metrics['precision'][k],
+                "recall": metrics['recall'][k],
+                "map": metrics['map'][k],
+                "mrr": metrics['mrr'][k],
+            })
+
+    # write CSV if requested
+    if args.metrics_csv:
+        out_csv = Path(args.metrics_csv)
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        with out_csv.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["method", "k", "ndcg", "precision", "recall", "map", "mrr"])
+            w.writeheader()
+            for row in results_rows:
+                w.writerow(row)
+        print(f"Wrote metrics CSV -> {out_csv}")
 
 
 if __name__ == "__main__":
