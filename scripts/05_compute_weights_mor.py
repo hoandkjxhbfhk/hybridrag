@@ -97,47 +97,78 @@ def compute_mor_post_weights(
     b: float,
     c: float,
 ) -> Dict[str, Dict[str, float]]:
-    # Tính s_run(q) = a*V_pre(q) + b*I_Moran(run,q) + c*V_post(run,q)
-    # Sau đó chuẩn hoá theo từng qid: w_run(q) = s_run / sum_s
-    run_names = list(runs.keys())
-    weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+    # Thay đổi: KHÔNG tính s_run cho BM25 bằng KMeans/Moran.
+    # Thay vào đó, trọng số của BM25 = 1 - (tổng trọng số các retriever khác).
+    # Với các retriever khác (non-BM25), vẫn tính s_run(q) = a*V_pre(q) + b*I_Moran + c*V_post,
+    # rồi chuyển s_run -> w_run bằng min-max theo từng retriever trên toàn bộ tập truy vấn (clip để tránh cực trị).
 
-    for qid in qids:
-        scores_per_run: Dict[str, float] = {}
-        for rn in run_names:
+    def is_bm25_run(name: str) -> bool:
+        n = name.lower()
+        return "bm25" in n
+
+    run_names = list(runs.keys())
+    bm25_runs = [rn for rn in run_names if is_bm25_run(rn)]
+    other_runs = [rn for rn in run_names if rn not in bm25_runs]
+
+    # 1) Tính điểm s_run(q) cho các retriever KHÔNG phải BM25
+    scores_per_run: Dict[str, Dict[str, float]] = {rn: {} for rn in other_runs}
+    for rn in other_runs:
+        for qid in qids:
             pairs = runs[rn].get(qid, [])[:topk]
             if not pairs:
-                scores_per_run[rn] = 0.0
+                scores_per_run[rn][qid] = 0.0
                 continue
             idxs = [docid_to_idx.get(docid, -1) for docid, _ in pairs]
             idxs = [i for i in idxs if i >= 0]
             if not idxs:
-                scores_per_run[rn] = 0.0
+                scores_per_run[rn][qid] = 0.0
                 continue
             D = doc_matrix[idxs]  # (K, dim), đã L2 normalized
-            # ma trận tương đồng cosine làm trọng số kề
-            S = (D @ D.T).astype(np.float32)
+            S = (D @ D.T).astype(np.float32)  # ma trận tương đồng cosine
             np.fill_diagonal(S, 0.0)
-            # local density vector L_i = mean_j S_ij
             if D.shape[0] > 1:
                 L = S.sum(axis=1) / float(D.shape[0] - 1)
             else:
                 L = np.zeros((1,), dtype=np.float32)
             I_moran = morans_I(L, S)
-            # V_post: trung bình V_pre(d_n)
             V_pres = [mor_pre_score(vec, centers, labels) for vec in D]
             V_post = float(np.mean(V_pres)) if V_pres else 0.0
             V_pre_q = float(q_pre_scores.get(qid, 0.0))
             s = a * V_pre_q + b * I_moran + c * V_post
-            scores_per_run[rn] = max(0.0, s)
-        total = sum(scores_per_run.values())
-        if total <= 1e-12:
-            # gán đều
-            for rn in run_names:
-                weights[rn][qid] = 1.0 / max(1, len(run_names))
+            scores_per_run[rn][qid] = max(0.0, float(s))
+
+    # 2) Min-max theo từng retriever (non-BM25) trên tất cả query để đưa về [0,1], rồi clip
+    weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+    for rn in other_runs:
+        vals = np.array([scores_per_run[rn].get(qid, 0.0) for qid in qids], dtype=np.float32)
+        if vals.size == 0:
+            for qid in qids:
+                weights[rn][qid] = 0.0
+            continue
+        mn, mx = float(vals.min()), float(vals.max())
+        denom = (mx - mn) if mx > mn else 1.0
+        for qid in qids:
+            norm = (scores_per_run[rn].get(qid, 0.0) - mn) / denom
+            # clip để tránh cực trị, tương tự MoR-pre
+            weights[rn][qid] = float(np.clip(norm, 0.2, 0.8))
+
+    # 3) Gán trọng số cho BM25 theo phần bù: 1 - trung bình(weight retriever khác)
+    # Nếu có nhiều BM25 runs, chia đều phần còn lại.
+    for qid in qids:
+        other_vals = [weights[rn].get(qid, 0.0) for rn in other_runs]
+        if other_vals:
+            other_mean = float(np.mean(other_vals))
+            bm25_share = max(0.0, 1.0 - other_mean)
         else:
-            for rn in run_names:
-                weights[rn][qid] = float(scores_per_run[rn] / total)
+            bm25_share = 1.0
+        if bm25_runs:
+            per_bm25 = bm25_share / float(len(bm25_runs))
+            for rn in bm25_runs:
+                weights[rn][qid] = per_bm25
+        else:
+            # không có bm25, giữ nguyên
+            pass
+
     return weights
 
 
