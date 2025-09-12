@@ -52,12 +52,27 @@ def retrieve_dense(index_dir: Path, model_alias: str, query_text: str, topk: int
     index = faiss.read_index(str(index_dir / "index.faiss"))
     ids = json.loads((index_dir / "ids.json").read_text(encoding="utf-8"))
 
-    if model_alias == "mpnet" or model_alias == "sentence-transformers":
-        model_name = "sentence-transformers/all-mpnet-base-v2"
-    elif model_alias == "facebook":
-        model_name = "facebook/contriever"
-    else:
-        model_name = model_alias
+    def get_model_name(alias: str) -> str:
+        a = alias.lower()
+        if a in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
+            return "sentence-transformers/all-mpnet-base-v2"
+        if a in ("contriever", "facebook/contriever"):
+            return "facebook/contriever"
+        if a in ("gtr", "gtr-base", "gtr-t5-base"):
+            return "sentence-transformers/gtr-t5-base"
+        if a in ("gtr-large", "gtr-t5-large"):
+            return "sentence-transformers/gtr-t5-large"
+        if a in ("tas-b", "tasb", "msmarco-distilbert-base-tas-b"):
+            return "sentence-transformers/msmarco-distilbert-base-tas-b"
+        if a in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("ance", "msmarco-ance"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
+            return "princeton-nlp/sup-simcse-roberta-base"
+        return alias
+
+    model_name = get_model_name(model_alias)
 
     model = SentenceTransformer(model_name)
 

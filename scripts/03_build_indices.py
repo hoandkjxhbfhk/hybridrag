@@ -115,18 +115,39 @@ def build_dense_index(docs: List[Dict], out_dir: Path, model_name: str, batch_si
 
 def parse_retrievers(s: str) -> List[str]:
     items = [x.strip() for x in s.split(",") if x.strip()]
-    # Hỗ trợ: bm25, mpnet, contriever
+    # Hỗ trợ: bm25, simcse, contriever, dpr, ance, tas-b, mpnet, gtr
     return items
 
 
 def get_model_name(alias: str) -> str:
-    alias = alias.lower()
-    if alias in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
+    """Map shorthand alias to a SentenceTransformers-compatible model name.
+
+    Notes:
+    - We prefer well-known ST repos for stability.
+    - Some families (e.g., DPR/ANCE) are approximated by strong MS MARCO dot-product models.
+    - Users can always pass a full HF repo name to override.
+    """
+    a = alias.lower()
+    # BM25 is handled separately
+    if a in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
         return "sentence-transformers/all-mpnet-base-v2"
-    if alias in ("contriever", "facebook/contriever"):
-        # SentenceTransformer có thể load từ HF repo trực tiếp
+    if a in ("contriever", "facebook/contriever"):
         return "facebook/contriever"
-    # Mặc định trả lại alias
+    if a in ("gtr", "gtr-base", "gtr-t5-base"):
+        return "sentence-transformers/gtr-t5-base"
+    if a in ("gtr-large", "gtr-t5-large"):
+        return "sentence-transformers/gtr-t5-large"
+    if a in ("tas-b", "tasb", "msmarco-distilbert-base-tas-b"):
+        return "sentence-transformers/msmarco-distilbert-base-tas-b"
+    if a in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
+        return "sentence-transformers/msmarco-bert-base-dot-v5"
+    if a in ("ance", "msmarco-ance"):
+        # If exact ANCE model is unavailable, fall back to a strong MS MARCO dot model
+        return "sentence-transformers/msmarco-bert-base-dot-v5"
+    if a in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
+        # Prefer a supervised SimCSE for sentence-level retrieval
+        return "princeton-nlp/sup-simcse-roberta-base"
+    # Otherwise assume it's already a full HF repo id
     return alias
 
 

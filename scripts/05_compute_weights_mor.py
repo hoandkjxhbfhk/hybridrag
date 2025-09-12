@@ -84,35 +84,220 @@ def morans_I(values: np.ndarray, W: np.ndarray) -> float:
     return float(I)
 
 
+def compute_mor_pre_weights_all(
+    runs: RunDict,
+    qids: List[str],
+    q_texts: List[str],
+    indices_base: Path,
+    kmeans_k: int,
+) -> Dict[str, Dict[str, float]]:
+    """Tính MoR-pre cho MỌI run dense theo không gian của CHÍNH run đó.
+
+    - Với mỗi run dense: KMeans trên doc embedding; encode queries bằng model tương ứng; tính V_pre(q) → min-max per-run → weight [0.2, 0.8].
+    - BM25: w_bm25(q) = 1 − mean(w_dense_runs(q)). Nếu nhiều BM25 runs → chia đều.
+    """
+
+    def is_bm25_run(name: str) -> bool:
+        return "bm25" in name.lower()
+
+    def get_model_name(alias: str) -> str:
+        a = alias.lower()
+        if a in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
+            return "sentence-transformers/all-mpnet-base-v2"
+        if a in ("contriever", "facebook/contriever"):
+            return "facebook/contriever"
+        if a in ("gtr", "gtr-base", "gtr-t5-base"):
+            return "sentence-transformers/gtr-t5-base"
+        if a in ("gtr-large", "gtr-t5-large"):
+            return "sentence-transformers/gtr-t5-large"
+        if a in ("tas-b", "tasb", "msmarco-distilbert-base-tas-b"):
+            return "sentence-transformers/msmarco-distilbert-base-tas-b"
+        if a in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("ance", "msmarco-ance"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
+            return "princeton-nlp/sup-simcse-roberta-base"
+        return alias
+
+    def dense_alias_from_run(run_name: str) -> str:
+        if run_name.startswith("dense_"):
+            part = run_name[len("dense_"):]
+            if "_" in part:
+                return part.rsplit("_", 1)[0]
+            return part
+        return run_name
+
+    run_names = sorted(runs.keys())
+    bm25_runs = [rn for rn in run_names if is_bm25_run(rn)]
+    dense_runs = [rn for rn in run_names if not is_bm25_run(rn) and rn.startswith("dense_")]
+
+    weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+
+    # Với từng dense run: tính V_pre(q) dựa trên không gian riêng của run
+    for rn in dense_runs:
+        idx_dir = indices_base / rn
+        if not idx_dir.exists():
+            # Nếu không có index, coi như w=0
+            for qid in qids:
+                weights[rn][qid] = 0.0
+            continue
+
+        # reconstruct doc vectors
+        index = faiss.read_index(str(idx_dir / "index.faiss"))
+        ntotal = index.ntotal
+        dim = index.d
+        doc_matrix = np.zeros((ntotal, dim), dtype=np.float32)
+        for start in range(0, ntotal, 1024):
+            end = min(ntotal, start + 1024)
+            chunk = np.vstack([index.reconstruct(i) for i in range(start, end)])
+            doc_matrix[start:end] = chunk
+        doc_matrix = l2_normalize(doc_matrix)
+
+        # KMeans trong không gian của run
+        centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
+
+        # Encode queries theo model của run
+        alias = dense_alias_from_run(rn)
+        model_name = get_model_name(alias)
+        model = SentenceTransformer(model_name)
+        q_matrix = model.encode(q_texts, convert_to_numpy=True, normalize_embeddings=False).astype(np.float32)
+        q_matrix = l2_normalize(q_matrix)
+
+        # Tính điểm V_pre cho mọi qid, rồi min-max per-run → weight
+        vals: List[float] = []
+        per_q_score: Dict[str, float] = {}
+        for qid, qv in zip(qids, q_matrix):
+            sc = mor_pre_score(qv, centers, labels)
+            per_q_score[qid] = float(sc)
+            vals.append(float(sc))
+        if vals:
+            mn, mx = float(np.min(vals)), float(np.max(vals))
+            denom = (mx - mn) if mx > mn else 1.0
+            for qid in qids:
+                norm = (per_q_score.get(qid, 0.0) - mn) / denom
+                weights[rn][qid] = float(np.clip(norm, 0.2, 0.8))
+        else:
+            for qid in qids:
+                weights[rn][qid] = 0.0
+
+    # BM25: 1 - mean(weights của tất cả dense runs)
+    for qid in qids:
+        dense_vals = [weights[rn].get(qid, 0.0) for rn in dense_runs]
+        if dense_vals:
+            other_mean = float(np.mean(dense_vals))
+            bm25_share = max(0.0, 1.0 - other_mean)
+        else:
+            bm25_share = 1.0
+        if bm25_runs:
+            per_bm25 = bm25_share / float(len(bm25_runs))
+            for rn in bm25_runs:
+                weights[rn][qid] = per_bm25
+
+    return weights
+
 def compute_mor_post_weights(
     runs: RunDict,
     qids: List[str],
-    q_pre_scores: Dict[str, float],
-    doc_matrix: np.ndarray,
-    docid_to_idx: Dict[str, int],
-    centers: np.ndarray,
-    labels: np.ndarray,
+    q_texts: List[str],
+    indices_base: Path,
+    kmeans_k: int,
     topk: int,
     a: float,
     b: float,
     c: float,
 ) -> Dict[str, Dict[str, float]]:
-    # Thay đổi: KHÔNG tính s_run cho BM25 bằng KMeans/Moran.
-    # Thay vào đó, trọng số của BM25 = 1 - (tổng trọng số các retriever khác).
-    # Với các retriever khác (non-BM25), vẫn tính s_run(q) = a*V_pre(q) + b*I_Moran + c*V_post,
-    # rồi chuyển s_run -> w_run bằng min-max theo từng retriever trên toàn bộ tập truy vấn (clip để tránh cực trị).
+    """Tính MoR-post cho tất cả run dense theo không gian của CHÍNH run đó.
+
+    - Với mỗi run dense (ví dụ: dense_mpnet_d, dense_contriever_d, ...):
+      * Load index FAISS và ids.
+      * KMeans trên doc embedding của run để có (centers, labels).
+      * Encode queries bằng model tương ứng, tính V_pre(q) theo run.
+      * Với mỗi qid: lấy top-K doc từ run, tạo ma trận S, tính I_moran và V_post.
+      * s_run(q) = a*V_pre(q) + b*I_moran + c*V_post.
+      * Chuẩn hoá min-max theo từng run → w_run(q) (clip [0.2, 0.8]).
+    - BM25: w_bm25(q) = 1 - mean(w_others(q)). Nếu nhiều BM25 runs → chia đều.
+    """
 
     def is_bm25_run(name: str) -> bool:
         n = name.lower()
         return "bm25" in n
 
-    run_names = list(runs.keys())
-    bm25_runs = [rn for rn in run_names if is_bm25_run(rn)]
-    other_runs = [rn for rn in run_names if rn not in bm25_runs]
+    def get_model_name(alias: str) -> str:
+        a = alias.lower()
+        if a in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
+            return "sentence-transformers/all-mpnet-base-v2"
+        if a in ("contriever", "facebook/contriever"):
+            return "facebook/contriever"
+        if a in ("gtr", "gtr-base", "gtr-t5-base"):
+            return "sentence-transformers/gtr-t5-base"
+        if a in ("gtr-large", "gtr-t5-large"):
+            return "sentence-transformers/gtr-t5-large"
+        if a in ("tas-b", "tasb", "msmarco-distilbert-base-tas-b"):
+            return "sentence-transformers/msmarco-distilbert-base-tas-b"
+        if a in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("ance", "msmarco-ance"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
+            return "princeton-nlp/sup-simcse-roberta-base"
+        return alias
 
-    # 1) Tính điểm s_run(q) cho các retriever KHÔNG phải BM25
-    scores_per_run: Dict[str, Dict[str, float]] = {rn: {} for rn in other_runs}
-    for rn in other_runs:
+    def dense_alias_from_run(run_name: str) -> str:
+        # run_name ví dụ: dense_mpnet_d → alias: mpnet
+        name = run_name
+        if name.startswith("dense_"):
+            part = name[len("dense_"):]
+            if "_" in part:
+                alias = part.rsplit("_", 1)[0]
+            else:
+                alias = part
+            return alias
+        return name
+
+    run_names = sorted(runs.keys())
+    bm25_runs = [rn for rn in run_names if is_bm25_run(rn)]
+    dense_runs = [rn for rn in run_names if not is_bm25_run(rn) and rn.startswith("dense_")]
+
+    # 1) Tính s_run(q) cho các run dense theo không gian của CHÍNH run đó
+    scores_per_run: Dict[str, Dict[str, float]] = {rn: {} for rn in dense_runs}
+
+    for rn in dense_runs:
+        idx_dir = indices_base / rn
+        if not idx_dir.exists():
+            # không tìm thấy index tương ứng → cho s=0 cho mọi qid
+            for qid in qids:
+                scores_per_run[rn][qid] = 0.0
+            continue
+
+        # Load doc embeddings
+        index = faiss.read_index(str(idx_dir / "index.faiss"))
+        ntotal = index.ntotal
+        dim = index.d
+        doc_matrix = np.zeros((ntotal, dim), dtype=np.float32)
+        for start in range(0, ntotal, 1024):
+            end = min(ntotal, start + 1024)
+            chunk = np.vstack([index.reconstruct(i) for i in range(start, end)])
+            doc_matrix[start:end] = chunk
+        doc_matrix = l2_normalize(doc_matrix)
+
+        ids = json.loads((idx_dir / "ids.json").read_text(encoding="utf-8"))
+        docid_to_idx: Dict[str, int] = {docid: i for i, docid in enumerate(ids)}
+
+        # KMeans trên không gian của chính run
+        centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
+
+        # Encode queries theo model của run để tính V_pre(q)
+        alias = dense_alias_from_run(rn)
+        model_name = get_model_name(alias)
+        model = SentenceTransformer(model_name)
+        q_matrix = model.encode(q_texts, convert_to_numpy=True, normalize_embeddings=False).astype(np.float32)
+        q_matrix = l2_normalize(q_matrix)
+        q_pre_scores_rn: Dict[str, float] = {}
+        for qid, qv in zip(qids, q_matrix):
+            q_pre_scores_rn[qid] = mor_pre_score(qv, centers, labels)
+
+        # Tính s_run(q) cho từng qid dùng top-K của RN
         for qid in qids:
             pairs = runs[rn].get(qid, [])[:topk]
             if not pairs:
@@ -123,8 +308,8 @@ def compute_mor_post_weights(
             if not idxs:
                 scores_per_run[rn][qid] = 0.0
                 continue
-            D = doc_matrix[idxs]  # (K, dim), đã L2 normalized
-            S = (D @ D.T).astype(np.float32)  # ma trận tương đồng cosine
+            D = doc_matrix[idxs]
+            S = (D @ D.T).astype(np.float32)
             np.fill_diagonal(S, 0.0)
             if D.shape[0] > 1:
                 L = S.sum(axis=1) / float(D.shape[0] - 1)
@@ -133,13 +318,13 @@ def compute_mor_post_weights(
             I_moran = morans_I(L, S)
             V_pres = [mor_pre_score(vec, centers, labels) for vec in D]
             V_post = float(np.mean(V_pres)) if V_pres else 0.0
-            V_pre_q = float(q_pre_scores.get(qid, 0.0))
+            V_pre_q = float(q_pre_scores_rn.get(qid, 0.0))
             s = a * V_pre_q + b * I_moran + c * V_post
             scores_per_run[rn][qid] = max(0.0, float(s))
 
-    # 2) Min-max theo từng retriever (non-BM25) trên tất cả query để đưa về [0,1], rồi clip
+    # 2) Min-max từng run dense → weight trong [0.2, 0.8]
     weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
-    for rn in other_runs:
+    for rn in dense_runs:
         vals = np.array([scores_per_run[rn].get(qid, 0.0) for qid in qids], dtype=np.float32)
         if vals.size == 0:
             for qid in qids:
@@ -149,13 +334,11 @@ def compute_mor_post_weights(
         denom = (mx - mn) if mx > mn else 1.0
         for qid in qids:
             norm = (scores_per_run[rn].get(qid, 0.0) - mn) / denom
-            # clip để tránh cực trị, tương tự MoR-pre
             weights[rn][qid] = float(np.clip(norm, 0.2, 0.8))
 
-    # 3) Gán trọng số cho BM25 theo phần bù: 1 - trung bình(weight retriever khác)
-    # Nếu có nhiều BM25 runs, chia đều phần còn lại.
+    # 3) BM25 là phần bù: 1 - mean(weight các run dense)
     for qid in qids:
-        other_vals = [weights[rn].get(qid, 0.0) for rn in other_runs]
+        other_vals = [weights[rn].get(qid, 0.0) for rn in dense_runs]
         if other_vals:
             other_mean = float(np.mean(other_vals))
             bm25_share = max(0.0, 1.0 - other_mean)
@@ -165,9 +348,6 @@ def compute_mor_post_weights(
             per_bm25 = bm25_share / float(len(bm25_runs))
             for rn in bm25_runs:
                 weights[rn][qid] = per_bm25
-        else:
-            # không có bm25, giữ nguyên
-            pass
 
     return weights
 
@@ -193,52 +373,20 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load dense index (mpnet, d)
-    dense_dir = idx_base / "dense_mpnet_d"
-    if not dense_dir.exists():
-        raise SystemExit(f"Dense index not found at {dense_dir}")
-    index = faiss.read_index(str(dense_dir / "index.faiss"))
-    ntotal = index.ntotal
-    dim = index.d
-    # reconstruct all vectors
-    doc_matrix = np.zeros((ntotal, dim), dtype=np.float32)
-    for start in range(0, ntotal, 1024):
-        end = min(ntotal, start + 1024)
-        chunk = np.vstack([index.reconstruct(i) for i in range(start, end)])
-        doc_matrix[start:end] = chunk
-    doc_matrix = l2_normalize(doc_matrix)
-
-    # id mapping
-    ids = json.loads((dense_dir / "ids.json").read_text(encoding="utf-8"))
-    docid_to_idx: Dict[str, int] = {docid: i for i, docid in enumerate(ids)}
-
-    # KMeans clusters on corpus vectors
-    centers, labels = compute_kmeans(doc_matrix, k=args.kmeans_k, seed=42)
-
-    # Encode queries and compute V_pre(q)
-    model = SentenceTransformer(args.model)
+    # Chuẩn bị queries
     q_items = read_jsonl(queries_path)
     q_texts = [q.get("text", "") for q in q_items]
     qids = [q.get("qid") or q.get("id") for q in q_items]
-    q_matrix = model.encode(q_texts, convert_to_numpy=True, normalize_embeddings=False).astype(np.float32)
-    q_matrix = l2_normalize(q_matrix)
-    q_pre_scores: Dict[str, float] = {}
-    for qid, qv in zip(qids, q_matrix):
-        q_pre_scores[qid] = mor_pre_score(qv, centers, labels)
 
     if args.mode in ("pre", "both"):
-        # Convert to weights per run (dense vs bm25) bằng đối ngẫu 1-w
-        weights_pre: Dict[str, Dict[str, float]] = {"dense_mpnet_d": {}, "bm25_d": {}}
-        # Normalize across queries với cặp 2 run
-        scores = np.array([q_pre_scores[qid] for qid in qids], dtype=np.float32)
-        mn, mx = float(scores.min()), float(scores.max())
-        denom = (mx - mn) if mx > mn else 1.0
-        norm_scores = (scores - mn) / denom
-        for qid, s in zip(qids, norm_scores):
-            wd = float(np.clip(s, 0.2, 0.6))  # clip để tránh cực trị
-            wb = float(1.0 - wd)
-            weights_pre["dense_mpnet_d"][qid] = wd
-            weights_pre["bm25_d"][qid] = wb
+        runs = read_runs(run_root)
+        weights_pre = compute_mor_pre_weights_all(
+            runs=runs,
+            qids=qids,
+            q_texts=q_texts,
+            indices_base=idx_base,
+            kmeans_k=args.kmeans_k,
+        )
         (out_dir / "mor_pre.json").write_text(json.dumps(weights_pre, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-pre weights to {out_dir / 'mor_pre.json'}")
 
@@ -247,11 +395,9 @@ def main() -> None:
         weights_post = compute_mor_post_weights(
             runs=runs,
             qids=qids,
-            q_pre_scores=q_pre_scores,
-            doc_matrix=doc_matrix,
-            docid_to_idx=docid_to_idx,
-            centers=centers,
-            labels=labels,
+            q_texts=q_texts,
+            indices_base=idx_base,
+            kmeans_k=args.kmeans_k,
             topk=args.topk,
             a=args.a,
             b=args.b,
