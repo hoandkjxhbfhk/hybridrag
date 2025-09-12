@@ -109,6 +109,8 @@ def _pick_n_questions(segment: str, n: int) -> List[str]:
 
 
 def generate_many(model, tokenizer, prompt: str, num: int, max_new_tokens: int, temperature: float) -> List[str]:
+    
+    
     import torch
 
     messages = [
