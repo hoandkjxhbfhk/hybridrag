@@ -37,97 +37,98 @@ def write_qrels(rows: List[Tuple[str, str, int]], path: Path) -> None:
             f.write(f"{qid}\t{pid}\t{score}\n")
 
 
-def build_query_prompt(text: str) -> str:
+def build_query_prompt(text: str, num: int) -> str:
     return (
         "Bạn là trợ lý tạo câu hỏi tìm kiếm.\n"
-        "Viết 1 câu hỏi ngắn bằng tiếng Việt mà đoạn sau trả lời trực tiếp.\n"
-        "- Chỉ in câu hỏi duy nhất, không đánh số, không giải thích.\n\n"
+        f"Viết {num} câu hỏi ngắn bằng tiếng Việt mà đoạn sau trả lời trực tiếp.\n"
+        "Yêu cầu định dạng đầu ra:\n"
+        "- Mỗi câu hỏi trên một dòng riêng.\n"
+        "- Không đánh số, không ký tự đầu dòng, không giải thích.\n"
+        "- Kết thúc mỗi câu bằng dấu hỏi chấm (?).\n\n"
         f"Đoạn văn:\n{text}\n"
     )
 
 
-def build_subq_prompt(query_text: str) -> str:
+def build_subq_prompt(query_text: str, num: int) -> str:
     return (
         "Bạn là trợ lý phân rã câu hỏi.\n"
-        "Hãy tạo 1 câu hỏi con ngắn gọn, cụ thể từ câu sau.\n"
-        "- Chỉ in câu hỏi, không giải thích.\n\n"
+        f"Hãy tạo {num} câu hỏi con ngắn gọn, cụ thể từ câu sau.\n"
+        "Yêu cầu định dạng đầu ra:\n"
+        "- Mỗi câu hỏi trên một dòng riêng.\n"
+        "- Không đánh số, không ký tự đầu dòng, không giải thích.\n"
+        "- Kết thúc mỗi câu bằng dấu hỏi chấm (?).\n\n"
         f"Câu hỏi:\n{query_text}\n"
     )
 
 
-def generate_list(model, tokenizer, prompt: str, num: int, max_new_tokens: int, temperature: float) -> List[str]:
+def _extract_assistant_segment(decoded: str) -> str:
+    # 1) Try to capture the assistant final segment when special tokens survive
+    m = re.search(r"<\|start\|>assistant(?:<\|channel\|>final)?<\|message\|>(.*?)<\|return\|>", decoded, flags=re.S)
+    if m:
+        return m.group(1).strip()
+    # 2) When special tokens are stripped, Unsloth templates often collapse to
+    #    'assistantanalysis... assistantfinal...'. Keep only the final content
+    #    and drop any analysis content.
+    tmp = re.sub(r"(?:^|\n)assistantanalysis.*?(?=(?:^|\n)assistantfinal|$)", "", decoded, flags=re.S)
+    if "assistantfinal" in tmp:
+        return tmp.split("assistantfinal", 1)[1].strip()
+    return decoded.strip()
+
+
+def _pick_n_questions(segment: str, n: int) -> List[str]:
+    items: List[str] = []
+    for ln in segment.split("\n"):
+        s = ln.strip()
+        if not s:
+            continue
+        # Remove list markers and role residues
+        s = re.sub(r"^\s*(?:\d+\.|[-•*:+])\s*", "", s)
+        s = re.sub(r"^assistant(?:<\|channel\|>)?(?:final|analysis)\s*", "", s, flags=re.I)
+        s = s.strip("\"'“”")
+        if 3 <= len(s) <= 200 and s.endswith("?"):
+            items.append(s)
+        if len(items) >= n:
+            break
+    if len(items) < n:
+        # Fallback: search all question-like substrings
+        qs = re.findall(r"([^\n\r\?]{3,200}\?)", segment)
+        for q in qs:
+            q = q.strip().strip("\"'“”")
+            if q and q not in items:
+                items.append(q)
+            if len(items) >= n:
+                break
+    return items[:n]
+
+
+def generate_many(model, tokenizer, prompt: str, num: int, max_new_tokens: int, temperature: float) -> List[str]:
     import torch
 
-    lines: List[str] = []
-    for _ in range(num):
-        messages = [
-            {"role": "user", "content": prompt},
-        ]
-        inputs = tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-            reasoning_effort="low",
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+        reasoning_effort="low",
+    )
+    inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
+
+    with torch.inference_mode():
+        out = model.generate(
+            **inputs,
+            do_sample=True,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
         )
-        inputs = {k: v.to(next(model.parameters()).device) for k, v in inputs.items()}
-
-        streamer = TextStreamer(tokenizer)
-        with torch.inference_mode():
-            out = model.generate(
-                **inputs,
-                do_sample=True,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                streamer=streamer,
-            )
-        # Decode only newly generated tokens to avoid including the prompt/template
-        start = inputs["input_ids"].shape[-1]
-        gen_only = out[0, start:]
-        decoded = [tokenizer.decode(gen_only, skip_special_tokens=True)]
-
-        extracted: List[str] = []
-        for d in decoded:
-            # 1) Try to capture the assistant final segment when special tokens survive
-            m = re.search(r"<\|start\|>assistant(?:<\|channel\|>final)?<\|message\|>(.*?)<\|return\|>", d, flags=re.S)
-            segment: str
-            if m:
-                segment = m.group(1).strip()
-            else:
-                # 2) When special tokens are stripped, Unsloth templates often collapse to
-                #    'assistantanalysis... assistantfinal...'. Keep only the final content
-                #    and drop any analysis content.
-                tmp = re.sub(r"(?:^|\n)assistantanalysis.*?(?=(?:^|\n)assistantfinal|$)", "", d, flags=re.S)
-                if "assistantfinal" in tmp:
-                    segment = tmp.split("assistantfinal", 1)[1]
-                else:
-                    segment = tmp
-
-            # From the chosen segment, pick the first plausible question line
-            picked = None
-            for ln in segment.split("\n"):
-                s = ln.strip()
-                if not s:
-                    continue
-                # Remove common list markers and role leftovers
-                s = s.lstrip("-•*:").strip()
-                s = re.sub(r"^assistant(?:<\|channel\|>)?(?:final|analysis)\s*", "", s, flags=re.I)
-                s = s.strip("\"'“”")
-                if 3 <= len(s) <= 200 and s.endswith("?"):
-                    picked = s
-                    break
-            if not picked:
-                # As a fallback, search any question-like substring
-                m2 = re.search(r"([^\n\r\?]{3,200}\?)", segment)
-                if m2:
-                    picked = m2.group(1).strip().strip("\"'“”")
-            if picked:
-                extracted.append(picked)
-        if extracted:
-            lines.append(extracted[0])
-        if len(lines) >= num:
-            break
-
+    # Decode only newly generated tokens to avoid including the prompt/template
+    start = inputs["input_ids"].shape[-1]
+    gen_only = out[0, start:]
+    decoded = tokenizer.decode(gen_only, skip_special_tokens=True)
+    segment = _extract_assistant_segment(decoded)
+    lines = _pick_n_questions(segment, num)
     while len(lines) < num:
         lines.append("Câu hỏi gì được trả lời bởi đoạn trên?")
     return lines[:num]
@@ -170,8 +171,8 @@ def main() -> None:
         base_qid_prefix = f"{base_id}#"
 
         if args.mode in ("q", "both"):
-            prompt_q = build_query_prompt(text)
-            qs = generate_list(
+            prompt_q = build_query_prompt(text, num=args.per_doc)
+            qs = generate_many(
                 model,
                 tokenizer,
                 prompt_q,
@@ -186,8 +187,8 @@ def main() -> None:
 
         if args.mode in ("sq", "both"):
             seed_q = queries_out[-1]["text"] if queries_out else text[:]
-            prompt_sq = build_subq_prompt(seed_q)
-            sqs = generate_list(
+            prompt_sq = build_subq_prompt(seed_q, num=args.per_doc)
+            sqs = generate_many(
                 model,
                 tokenizer,
                 prompt_sq,
