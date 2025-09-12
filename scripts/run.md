@@ -16,3 +16,19 @@ python scripts/06_fuse_and_eval.py --qrels data/beir/qrels_test.tsv --runs runs 
 python scripts/07_ablation.py --out results/ablation.csv | cat
 
 python scripts/07_ablation.py --plan configs/ablation.yaml --out results/ablation.csv | cat
+
+
+
+
+python scripts/03_build_indices.py --corpus data/beir/corpus.jsonl --out indices --retrievers "bm25,mpnet,contriever,simcse,dpr,ance,tas-b,gtr"
+
+
+python scripts/04_retrieve.py --queries data/beir/queries.jsonl --indices indices --topk 100 --out runs
+
+
+python scripts/05_compute_weights_mor.py --queries data/beir/queries.jsonl --indices indices --runs runs --out weights --kmeans-k 64 --topk 20 --mode post
+
+
+python scripts/06_fuse_and_eval.py --qrels data/beir/qrels_test.tsv --runs runs --fusion normalized_sum rrf weighted_sum_mor_post --weights weights --out fusion
+
+
