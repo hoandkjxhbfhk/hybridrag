@@ -95,6 +95,13 @@ def main() -> None:
     parser.add_argument("--indices", type=str, required=True)
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--out", type=str, default="runs")
+    parser.add_argument(
+        "--bm25-norm",
+        type=str,
+        default="none",
+        choices=["none", "minmax", "zscore", "softmax", "max1"],
+        help="Chuẩn hoá điểm BM25 theo truy vấn: none|minmax|zscore|softmax|max1",
+    )
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -114,6 +121,35 @@ def main() -> None:
             runname = name
             if name.startswith("bm25_"):
                 pairs = retrieve_bm25(idx_dir, qtext, args.topk)
+                # Chuẩn hoá điểm theo truy vấn nếu được yêu cầu
+                if args.bm25_norm and args.bm25_norm != "none":
+                    scores = np.array([s for _, s in pairs], dtype=np.float32)
+                    if scores.size:
+                        method = args.bm25_norm
+                        if method == "minmax":
+                            s_min = float(scores.min())
+                            s_max = float(scores.max())
+                            if s_max > s_min:
+                                norm = (scores - s_min) / (s_max - s_min)
+                            else:
+                                norm = np.ones_like(scores)
+                        elif method == "zscore":
+                            mean = float(scores.mean())
+                            std = float(scores.std()) + 1e-12
+                            norm = (scores - mean) / std
+                        elif method == "softmax":
+                            mx = float(scores.max())
+                            expv = np.exp(scores - mx)
+                            norm = expv / (float(expv.sum()) + 1e-12)
+                        elif method == "max1":
+                            m = float(scores.max())
+                            if m > 0:
+                                norm = scores / m
+                            else:
+                                norm = np.zeros_like(scores)
+                        else:
+                            norm = scores
+                        pairs = [(docid, float(s)) for (docid, _), s in zip(pairs, norm)]
             elif name.startswith("dense_"):
                 parts = name.split("_")
                 if len(parts) < 3:

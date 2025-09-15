@@ -7,7 +7,7 @@ python scripts/02_generate_queries_unsloth.py --corpus data/beir/corpus.jsonl --
 
 python scripts/03_build_indices.py --corpus data/beir/corpus.jsonl --out indices --retrievers bm25,mpnet --gran qd | cat
 
-python scripts/04_retrieve.py --queries data/beir/queries.jsonl --indices indices --topk 50 --out runs | cat
+python scripts/04_retrieve.py --queries data/beir/queries.jsonl --indices indices --topk 50 --out runs  --bm25-norm minmax | cat
 
 python scripts/05_compute_weights_mor.py --queries data/beir/queries.jsonl --indices indices --out weights --kmeans-k 4 | cat
 

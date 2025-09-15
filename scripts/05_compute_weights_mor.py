@@ -176,7 +176,7 @@ def compute_mor_pre_weights_all(
             denom = (mx - mn) if mx > mn else 1.0
             for qid in qids:
                 norm = (per_q_score.get(qid, 0.0) - mn) / denom
-                weights[rn][qid] = float(np.clip(norm, 0.2, 0.8))
+                weights[rn][qid] = float(np.clip(norm, 0.001, 0.99))
         else:
             for qid in qids:
                 weights[rn][qid] = 0.0
@@ -334,7 +334,7 @@ def compute_mor_post_weights(
         denom = (mx - mn) if mx > mn else 1.0
         for qid in qids:
             norm = (scores_per_run[rn].get(qid, 0.0) - mn) / denom
-            weights[rn][qid] = float(np.clip(norm, 0.2, 0.8))
+            weights[rn][qid] = float(np.clip(norm, 0.01, 0.99))
 
     # 3) BM25 là phần bù: 1 - mean(weight các run dense)
     for qid in qids:
