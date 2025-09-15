@@ -179,8 +179,9 @@ def main() -> None:
     for rec in read_jsonl(corpus_path):
         pid = rec["_id"]
         text = rec.get("text", "")
-        base_id = rec.get("metadata", {}).get("base_id", pid)
-        base_qid_prefix = f"{base_id}#"
+        # Đổi quy ước qid: dùng trực tiếp chunk id (pid) thay vì base_id
+        # Ví dụ: qid = "doc-0-ch3#0" thay vì "doc-0#0"
+        base_qid_prefix = f"{pid}#"
 
         if args.mode in ("q", "both"):
             prompt_q = build_query_prompt(text, num=args.per_doc)
