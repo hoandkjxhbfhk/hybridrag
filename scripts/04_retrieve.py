@@ -110,6 +110,15 @@ def main() -> None:
 
     available = [p for p in idx_base.iterdir() if p.is_dir()]
 
+    # Xoá file run cũ để tránh cộng dồn qua các lần chạy
+    for idx_dir in available:
+        old_run = out_base / idx_dir.name / "test.txt"
+        if old_run.exists():
+            try:
+                old_run.unlink()
+            except Exception:
+                pass
+
     for q in read_jsonl(queries_path):
         qid = q.get("qid") or q.get("id")
         qtext = q.get("text", "")

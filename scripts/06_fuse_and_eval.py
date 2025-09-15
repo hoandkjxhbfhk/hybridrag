@@ -27,17 +27,22 @@ def read_qrels(path: Path) -> Dict[str, Dict[str, int]]:
 
 
 def read_run_file(path: Path) -> Dict[str, List[Tuple[str, float]]]:
-    per_q: Dict[str, List[Tuple[str, float]]] = collections.defaultdict(list)
+    per_q_best: Dict[str, Dict[str, float]] = collections.defaultdict(dict)
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) != 6:
                 continue
-            qid, _, docid, rank, score, _ = parts
-            per_q[qid].append((docid, float(score)))
-    # sort by score desc, keep best rank
-    for qid in per_q:
-        per_q[qid].sort(key=lambda x: x[1], reverse=True)
+            qid, _, docid, _rank, score, _ = parts
+            s = float(score)
+            prev = per_q_best[qid].get(docid)
+            if prev is None or s > prev:
+                per_q_best[qid][docid] = s
+    per_q: Dict[str, List[Tuple[str, float]]] = {}
+    for qid, d in per_q_best.items():
+        items = list(d.items())
+        items.sort(key=lambda x: x[1], reverse=True)
+        per_q[qid] = items
     return per_q
 
 
