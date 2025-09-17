@@ -3,6 +3,8 @@
 import argparse
 import collections
 import csv
+import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Iterable
 
@@ -193,19 +195,25 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=100)
     parser.add_argument("--k-list", type=str, default="5,20", help="Comma-separated cutoffs to report metrics at")
     parser.add_argument("--step", type=float, default=0.1, help="Weight step (e.g., 0.1)")
+    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Log level")
     args = parser.parse_args()
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
+    t0 = time.time()
 
     qrels = read_qrels(Path(args.qrels))
     runs = collect_runs(Path(args.runs))
 
     if not runs:
-        print("No runs found.")
+        logging.error("No runs found at %s", args.runs)
         return
 
     run_names = sorted(runs.keys())
+    logging.info("Loaded %d runs: %s", len(run_names), ", ".join(run_names))
     k_list = [int(x) for x in args.k_list.split(",") if x.strip()]
 
     combos = generate_weight_combinations(run_names, step=args.step)
+    logging.info("Generated %d weight combinations with step=%.3f", len(combos), args.step)
 
     out_csv = Path(args.out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -221,7 +229,7 @@ def main() -> None:
 
     best = {"combo": None, "metric": "ndcg", "k": k_list[0], "score": -1.0}
 
-    for weights in combos:
+    for idx, weights in enumerate(combos, start=1):
         fused = weighted_normalized_sum_fusion(runs, weights=weights, topk=args.topk)
         metrics = evaluate_all_metrics(qrels, fused, k_list=k_list)
         row = {"weights": ";".join(f"{rn}:{weights[rn]:.1f}" for rn in run_names)}
@@ -236,6 +244,10 @@ def main() -> None:
         nd = metrics["ndcg"][k_list[0]]
         if nd > best["score"]:
             best = {"combo": row["weights"], "metric": "ndcg", "k": k_list[0], "score": nd}
+            logging.info("New best NDCG@%d = %.4f at %s", k_list[0], nd, row["weights"]) 
+        if idx % 100 == 0:
+            elapsed = time.time() - t0
+            logging.info("Progress: %d/%d combos processed (%.1f%%) in %.1fs", idx, len(combos), 100.0 * idx / max(1, len(combos)), elapsed)
 
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         fieldnames = ["weights"] + [f"{m}@{k}" for m in ("ndcg", "precision", "recall", "map", "mrr") for k in k_list]
@@ -245,14 +257,15 @@ def main() -> None:
             w.writerow(r)
 
     # print averages and best
-    print(f"Wrote CSV -> {out_csv}")
+    logging.info("Wrote CSV -> %s", out_csv)
     for m in ("ndcg", "precision", "recall", "map", "mrr"):
         for k in k_list:
             vals = agg_metrics[m][k]
             mean_val = float(np.mean(vals)) if vals else 0.0
-            print(f"AVG {m}@{k} = {mean_val:.4f} over {len(vals)} combos")
+            logging.info("AVG %s@%d = %.4f over %d combos", m, k, mean_val, len(vals))
     if best["combo"] is not None:
-        print(f"BEST {best['metric']}@{best['k']} = {best['score']:.4f} at {best['combo']}")
+        logging.info("BEST %s@%d = %.4f at %s", best["metric"], best["k"], best["score"], best["combo"])
+    logging.info("Done in %.2fs", time.time() - t0)
 
 
 if __name__ == "__main__":
@@ -266,3 +279,4 @@ if __name__ == "__main__":
 #   --topk 100 \
 #   --k-list 5,20 \
 #   --step 0.1 | cat
+# --log-level INFO | cat
