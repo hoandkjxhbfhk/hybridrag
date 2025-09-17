@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Iterable
 
 import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 RunRow = Tuple[str, str, int, float, str]
@@ -196,6 +200,8 @@ def main() -> None:
     parser.add_argument("--k-list", type=str, default="5,20", help="Comma-separated cutoffs to report metrics at")
     parser.add_argument("--step", type=float, default=0.1, help="Weight step (e.g., 0.1)")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Log level")
+    parser.add_argument("--plot-dir", type=str, default="results/plots", help="Directory to save metric distribution plots")
+    parser.add_argument("--plot-kind", type=str, default="hist", choices=["hist", "box"], help="Plot kind: histogram or boxplot")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
@@ -267,6 +273,32 @@ def main() -> None:
         logging.info("BEST %s@%d = %.4f at %s", best["metric"], best["k"], best["score"], best["combo"])
     logging.info("Done in %.2fs", time.time() - t0)
 
+    # plot distributions
+    try:
+        plot_dir = Path(args.plot_dir)
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(rows)
+        metrics_cols = [c for c in df.columns if c != "weights"]
+        for col in metrics_cols:
+            vals = df[col].dropna().values
+            if vals.size == 0:
+                continue
+            plt.figure(figsize=(6, 4))
+            if args.plot_kind == "hist":
+                plt.hist(vals, bins=30, color="#1f77b4", alpha=0.8)
+            else:
+                plt.boxplot(vals, vert=True)
+            plt.title(f"Distribution of {col}")
+            plt.xlabel(col)
+            plt.ylabel("Frequency" if args.plot_kind == "hist" else "Value")
+            out_png = plot_dir / f"dist_{col}_{args.plot_kind}.png"
+            plt.tight_layout()
+            plt.savefig(out_png)
+            plt.close()
+            logging.info("Saved plot: %s", out_png)
+    except Exception as e:
+        logging.warning("Plotting failed: %s", e)
+
 
 if __name__ == "__main__":
     main()
@@ -279,4 +311,6 @@ if __name__ == "__main__":
 #   --topk 100 \
 #   --k-list 5,20 \
 #   --step 0.1 | cat
+# --plot-dir results/plots \
+#   --plot-kind hist \
 # --log-level INFO | cat
