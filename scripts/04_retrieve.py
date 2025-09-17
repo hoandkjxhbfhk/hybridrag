@@ -9,7 +9,7 @@ import numpy as np
 
 # BM25 (Whoosh)
 from whoosh import index as windex
-from whoosh.qparser import QueryParser
+from whoosh.qparser import QueryParser, OrGroup
 
 
 def read_jsonl(path: Path) -> Iterable[Dict]:
@@ -35,7 +35,7 @@ def trec_write(path: Path, rows: List[Tuple[str, str, int, float, str]]) -> None
 def retrieve_bm25(index_dir: Path, query_text: str, topk: int) -> List[Tuple[str, float]]:
     idx = windex.open_dir(str(index_dir))
     with idx.searcher() as searcher:
-        parser = QueryParser("text", schema=searcher.schema)
+        parser = QueryParser("text", schema=searcher.schema, group=OrGroup.factory(0.15))
         q = parser.parse(query_text)
         results = searcher.search(q, limit=topk)
         pairs: List[Tuple[str, float]] = []
