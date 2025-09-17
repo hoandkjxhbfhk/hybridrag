@@ -259,3 +259,10 @@ if __name__ == "__main__":
     main()
 
 
+# python scripts/08_weighted_normsum_grid.py \
+#   --qrels /home/hoan/hybridrag/data/qrels.tsv \
+#   --runs /home/hoan/hybridrag/runs \
+#   --out-csv /home/hoan/hybridrag/results/weighted_normsum_grid.csv \
+#   --topk 100 \
+#   --k-list 5,20 \
+#   --step 0.1 | cat
