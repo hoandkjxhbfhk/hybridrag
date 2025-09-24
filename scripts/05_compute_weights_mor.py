@@ -413,6 +413,168 @@ def compute_mor_post_weights(
     return weights
 
 
+def compute_mor_post_entropy_weights(
+    runs: RunDict,
+    qids: List[str],
+    q_texts: List[str],
+    indices_base: Path,
+    kmeans_k: int,
+    topk: int,
+    a: float,
+    b: float,
+    c: float,
+    d: float,
+    entropy_topk: int,
+    entropy_tau: float,
+) -> Dict[str, Dict[str, float]]:
+    """Giống compute_mor_post_weights nhưng trừ thêm d * entropy.
+
+    Entropy được tính trên top-entropy_topk điểm số của run đó cho từng qid: p=softmax(scores/tau), H=-Σ p log p.
+    s = a*V_pre_q + b*I_moran + c*V_post - d*H
+    → min-max theo từng run → weight; BM25: phần bù 1 - mean(weight dense).
+    """
+
+    def is_bm25_run(name: str) -> bool:
+        n = name.lower()
+        return "bm25" in n
+
+    def get_model_name(alias: str) -> str:
+        a_ = alias.lower()
+        if a_ in ("mpnet", "all-mpnet-base-v2", "st-mpnet"):
+            return "sentence-transformers/all-mpnet-base-v2"
+        if a_ in ("contriever", "facebook/contriever"):
+            return "facebook/contriever"
+        if a_ in ("gtr", "gtr-base", "gtr-t5-base"):
+            return "sentence-transformers/gtr-t5-base"
+        if a_ in ("gtr-large", "gtr-t5-large"):
+            return "sentence-transformers/gtr-t5-large"
+        if a_ in ("tas-b", "tasb", "msmarco-distilbert-base-tas-b"):
+            return "sentence-transformers/msmarco-distilbert-base-tas-b"
+        if a_ in ("dpr", "msmarco-dot", "msmarco-bert-base-dot-v5"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a_ in ("ance", "msmarco-ance"):
+            return "sentence-transformers/msmarco-bert-base-dot-v5"
+        if a_ in ("simcse", "simcse-bert-base", "unsup-simcse-bert-base"):
+            return "princeton-nlp/sup-simcse-roberta-base"
+        return alias
+
+    def dense_alias_from_run(run_name: str) -> str:
+        name = run_name
+        if name.startswith("dense_"):
+            part = name[len("dense_"):]
+            if "_" in part:
+                alias_ = part.rsplit("_", 1)[0]
+            else:
+                alias_ = part
+            return alias_
+        return name
+
+    run_names = sorted(runs.keys())
+    bm25_runs = [rn for rn in run_names if is_bm25_run(rn)]
+    dense_runs = [rn for rn in run_names if not is_bm25_run(rn) and rn.startswith("dense_")]
+
+    # 1) Tính s_run(q) cho các run dense
+    scores_per_run: Dict[str, Dict[str, float]] = {rn: {} for rn in dense_runs}
+
+    for rn in dense_runs:
+        idx_dir = indices_base / rn
+        if not idx_dir.exists():
+            for qid in qids:
+                scores_per_run[rn][qid] = 0.0
+            continue
+
+        # Load doc embeddings
+        index = faiss.read_index(str(idx_dir / "index.faiss"))
+        ntotal = index.ntotal
+        dim = index.d
+        doc_matrix = np.zeros((ntotal, dim), dtype=np.float32)
+        for start in range(0, ntotal, 1024):
+            end = min(ntotal, start + 1024)
+            chunk = np.vstack([index.reconstruct(i) for i in range(start, end)])
+            doc_matrix[start:end] = chunk
+        doc_matrix = l2_normalize(doc_matrix)
+
+        ids = json.loads((idx_dir / "ids.json").read_text(encoding="utf-8"))
+        docid_to_idx: Dict[str, int] = {docid: i for i, docid in enumerate(ids)}
+
+        # KMeans trên không gian của chính run
+        centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
+
+        # Encode queries theo model của run để tính V_pre(q)
+        alias = dense_alias_from_run(rn)
+        model_name = get_model_name(alias)
+        model = SentenceTransformer(model_name)
+        q_matrix = model.encode(q_texts, convert_to_numpy=True, normalize_embeddings=False).astype(np.float32)
+        q_matrix = l2_normalize(q_matrix)
+        q_pre_scores_rn: Dict[str, float] = {}
+        for qid, qv in zip(qids, q_matrix):
+            q_pre_scores_rn[qid] = mor_pre_score(qv, centers, labels)
+
+        # Tính s_run(q)
+        for qid in qids:
+            # Cho MoR-post
+            pairs_mor = runs[rn].get(qid, [])[:topk]
+            if not pairs_mor:
+                scores_per_run[rn][qid] = 0.0
+                continue
+            idxs = [docid_to_idx.get(docid, -1) for docid, _ in pairs_mor]
+            idxs = [i for i in idxs if i >= 0]
+            if not idxs:
+                scores_per_run[rn][qid] = 0.0
+                continue
+            D = doc_matrix[idxs]
+            S = (D @ D.T).astype(np.float32)
+            np.fill_diagonal(S, 0.0)
+            if D.shape[0] > 1:
+                L = S.sum(axis=1) / float(D.shape[0] - 1)
+            else:
+                L = np.zeros((1,), dtype=np.float32)
+            I_moran = morans_I(L, S)
+            V_pres = [mor_pre_score(vec, centers, labels) for vec in D]
+            V_post = float(np.mean(V_pres)) if V_pres else 0.0
+            V_pre_q = float(q_pre_scores_rn.get(qid, 0.0))
+
+            # Cho entropy
+            pairs_ent = runs[rn].get(qid, [])[:entropy_topk]
+            if not pairs_ent:
+                H = 1e6
+            else:
+                scores = np.array([float(s) for _, s in pairs_ent], dtype=np.float64)
+                probs = softmax(scores, tau=entropy_tau)
+                H = float(-np.sum(probs * np.log(probs + 1e-12)))
+
+            s = a * V_pre_q + b * I_moran + c * V_post - d * H
+            scores_per_run[rn][qid] = max(0.0, float(s))
+
+    # 2) Min-max từng run dense → weight
+    weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+    for rn in dense_runs:
+        vals = np.array([scores_per_run[rn].get(qid, 0.0) for qid in qids], dtype=np.float32)
+        if vals.size == 0:
+            for qid in qids:
+                weights[rn][qid] = 0.0
+            continue
+        mn, mx = float(vals.min()), float(vals.max())
+        denom = (mx - mn) if mx > mn else 1.0
+        for qid in qids:
+            norm = (scores_per_run[rn].get(qid, 0.0) - mn) / denom
+            weights[rn][qid] = float(np.clip(norm, 0.01, 0.99))
+
+    # 3) BM25: phần bù
+    for qid in qids:
+        other_vals = [weights[rn].get(qid, 0.0) for rn in dense_runs]
+        if other_vals:
+            other_mean = float(np.mean(other_vals))
+            bm25_share = max(0.0, 1.0 - other_mean)
+        else:
+            bm25_share = 1.0
+        if bm25_runs:
+            per_bm25 = bm25_share / float(len(bm25_runs))
+            for rn in bm25_runs:
+                weights[rn][qid] = per_bm25
+
+    return weights
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute MoR-pre/post/entropy weights and save JSON")
     parser.add_argument("--queries", type=str, default="data/beir/queries.jsonl")
@@ -425,9 +587,10 @@ def main() -> None:
     parser.add_argument("--b", type=float, default=0.3)
     parser.add_argument("--c", type=float, default=0.6)
     parser.add_argument("--model", type=str, default="sentence-transformers/all-mpnet-base-v2")
-    parser.add_argument("--mode", type=str, default="all", choices=["pre", "post", "entropy", "both", "all"])
+    parser.add_argument("--mode", type=str, default="all", choices=["pre", "post", "post_entropy", "entropy", "both", "all"])
     parser.add_argument("--entropy-topk", type=int, default=10, help="Top-K docs for entropy calculation")
     parser.add_argument("--entropy-tau", type=float, default=1.0, help="Temperature for softmax in entropy calculation")
+    parser.add_argument("--d", type=float, default=0.3, help="Coefficient for entropy term in post+entropy score")
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -481,6 +644,25 @@ def main() -> None:
         )
         (out_dir / "entropy_weights.json").write_text(json.dumps(weights_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote Entropy weights to {out_dir / 'entropy_weights.json'}")
+
+    if args.mode in ("post_entropy",) or run_in_all:
+        runs = read_runs(run_root)
+        weights_post_entropy = compute_mor_post_entropy_weights(
+            runs=runs,
+            qids=qids,
+            q_texts=q_texts,
+            indices_base=idx_base,
+            kmeans_k=args.kmeans_k,
+            topk=args.topk,
+            a=args.a,
+            b=args.b,
+            c=args.c,
+            d=args.d,
+            entropy_topk=args.entropy_topk,
+            entropy_tau=args.entropy_tau,
+        )
+        (out_dir / "mor_post_entropy.json").write_text(json.dumps(weights_post_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Wrote MoR-post+Entropy weights to {out_dir / 'mor_post_entropy.json'}")
 
 
 if __name__ == "__main__":

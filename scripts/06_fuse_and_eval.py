@@ -232,7 +232,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Fuse run files and evaluate metrics (NDCG, P, R, MAP, MRR)")
     parser.add_argument("--qrels", type=str, required=True)
     parser.add_argument("--runs", type=str, required=True)
-    parser.add_argument("--fusion", nargs="+", default=["normalized_sum", "rrf", "weighted_sum_mor_pre", "weighted_sum_mor_post", "weighted_sum_entropy"])  # include mor_post + entropy
+    parser.add_argument("--fusion", nargs="+", default=["normalized_sum", "rrf", "weighted_sum_mor_pre", "weighted_sum_mor_post", "weighted_sum_entropy", "weighted_sum_mor_post_entropy"])  # include mor_post + entropy combo
     parser.add_argument("--weights", type=str, default="weights")
     parser.add_argument("--out", type=str, default="fusion")
     parser.add_argument("--topk", type=int, default=100)
@@ -263,6 +263,9 @@ def main() -> None:
             fused = weighted_sum_with_weights(runs, weights_path, topk=args.topk)
         elif method == "weighted_sum_entropy":
             weights_path = Path(args.weights) / "entropy_weights.json"
+            fused = weighted_sum_with_weights(runs, weights_path, topk=args.topk)
+        elif method == "weighted_sum_mor_post_entropy":
+            weights_path = Path(args.weights) / "mor_post_entropy.json"
             fused = weighted_sum_with_weights(runs, weights_path, topk=args.topk)
         else:
             fused = normalized_sum_fusion(runs, topk=args.topk)
