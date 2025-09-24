@@ -65,6 +65,67 @@ def read_runs(run_root: Path) -> RunDict:
     return runs
 
 
+def softmax(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
+    """Stable softmax với nhiệt độ tau cho vector 1D.
+
+    Nếu tổng mũ bị underflow, trả về phân phối đều.
+    """
+    if x.ndim != 1:
+        x = x.reshape(-1)
+    t = float(max(tau, 1e-12))
+    z = (x.astype(np.float64) / t)
+    z = z - float(np.max(z))
+    e = np.exp(z)
+    s = float(np.sum(e))
+    if s <= 1e-12:
+        n = e.size if e.size > 0 else 1
+        return np.ones((n,), dtype=np.float64) / float(n)
+    return (e / s).astype(np.float64)
+
+
+def compute_entropy_weights(
+    runs: RunDict,
+    qids: List[str],
+    topk: int,
+    tau: float,
+) -> Dict[str, Dict[str, float]]:
+    """Tính trọng số entropy cho mỗi run và mỗi truy vấn.
+
+    - Với từng (run, qid): lấy top-K điểm số → p = softmax(scores / tau) → H = -Σ p log p.
+    - Với mỗi qid: w_run(q) = softmax_theo_run(-H_run(q)) đảm bảo tổng = 1.
+    """
+    run_names = sorted(runs.keys())
+
+    entropies: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+    for rn in run_names:
+        per_q = runs.get(rn, {})
+        for qid in qids:
+            pairs = per_q.get(qid, [])[:topk]
+            if not pairs:
+                entropies[rn][qid] = 1e6
+                continue
+            scores = np.array([float(s) for _, s in pairs], dtype=np.float64)
+            probs = softmax(scores, tau=tau)
+            H = float(-np.sum(probs * np.log(probs + 1e-12)))
+            entropies[rn][qid] = H
+
+    weights: Dict[str, Dict[str, float]] = {rn: {} for rn in run_names}
+    for qid in qids:
+        Hs = np.array([entropies[rn].get(qid, 1e6) for rn in run_names], dtype=np.float64)
+        logits = -Hs
+        m = float(np.max(logits))
+        exps = np.exp(logits - m)
+        denom = float(np.sum(exps))
+        if denom <= 1e-12:
+            w = np.ones_like(exps) / float(exps.size if exps.size else 1)
+        else:
+            w = exps / denom
+        for rn, val in zip(run_names, w.tolist()):
+            weights[rn][qid] = float(val)
+
+    return weights
+
+
 def morans_I(values: np.ndarray, W: np.ndarray) -> float:
     # values: shape (K,), W: adjacency shape (K,K), zero diagonal, non-negative
     n = values.shape[0]
@@ -353,7 +414,7 @@ def compute_mor_post_weights(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compute MoR-pre/post weights and save JSON")
+    parser = argparse.ArgumentParser(description="Compute MoR-pre/post/entropy weights and save JSON")
     parser.add_argument("--queries", type=str, default="data/beir/queries.jsonl")
     parser.add_argument("--indices", type=str, default="indices")
     parser.add_argument("--runs", type=str, default="runs")
@@ -364,7 +425,9 @@ def main() -> None:
     parser.add_argument("--b", type=float, default=0.3)
     parser.add_argument("--c", type=float, default=0.6)
     parser.add_argument("--model", type=str, default="sentence-transformers/all-mpnet-base-v2")
-    parser.add_argument("--mode", type=str, default="both", choices=["pre", "post", "both"])
+    parser.add_argument("--mode", type=str, default="all", choices=["pre", "post", "entropy", "both", "all"])
+    parser.add_argument("--entropy-topk", type=int, default=10, help="Top-K docs for entropy calculation")
+    parser.add_argument("--entropy-tau", type=float, default=1.0, help="Temperature for softmax in entropy calculation")
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -378,7 +441,9 @@ def main() -> None:
     q_texts = [q.get("text", "") for q in q_items]
     qids = [q.get("qid") or q.get("id") for q in q_items]
 
-    if args.mode in ("pre", "both"):
+    run_in_all = args.mode == "all"
+
+    if args.mode in ("pre", "both") or run_in_all:
         runs = read_runs(run_root)
         weights_pre = compute_mor_pre_weights_all(
             runs=runs,
@@ -390,7 +455,7 @@ def main() -> None:
         (out_dir / "mor_pre.json").write_text(json.dumps(weights_pre, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-pre weights to {out_dir / 'mor_pre.json'}")
 
-    if args.mode in ("post", "both"):
+    if args.mode in ("post", "both") or run_in_all:
         runs = read_runs(run_root)
         weights_post = compute_mor_post_weights(
             runs=runs,
@@ -405,6 +470,17 @@ def main() -> None:
         )
         (out_dir / "mor_post.json").write_text(json.dumps(weights_post, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post weights to {out_dir / 'mor_post.json'}")
+
+    if args.mode in ("entropy",) or run_in_all:
+        runs = read_runs(run_root)
+        weights_entropy = compute_entropy_weights(
+            runs=runs,
+            qids=qids,
+            topk=args.entropy_topk,
+            tau=args.entropy_tau,
+        )
+        (out_dir / "entropy_weights.json").write_text(json.dumps(weights_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Wrote Entropy weights to {out_dir / 'entropy_weights.json'}")
 
 
 if __name__ == "__main__":
