@@ -170,14 +170,19 @@ def visualize_clusters_2d(
             db_labels = db.fit_predict(X2)
 
             mask_noise = (db_labels == -1)
-            # Plot noise trước (xám nhạt)
+            sc_noise = None
+            # Plot noise trước
             if np.any(mask_noise):
-                ax.scatter(
+                only_noise = bool(np.all(mask_noise))
+                noise_color = "#666666" if only_noise else "lightgray"
+                noise_size = 10 if only_noise else 5
+                noise_alpha = 0.8 if only_noise else 0.5
+                sc_noise = ax.scatter(
                     X2[mask_noise, 0],
                     X2[mask_noise, 1],
-                    c="lightgray",
-                    s=5,
-                    alpha=0.5,
+                    c=noise_color,
+                    s=noise_size,
+                    alpha=noise_alpha,
                     linewidths=0,
                     label="noise",
                 )
@@ -192,6 +197,9 @@ def visualize_clusters_2d(
                     alpha=0.8,
                     linewidths=0,
                 )
+            # Nếu tất cả là noise, dùng scatter noise làm sc để đảm bảo có điểm hiển thị
+            if sc is None and sc_noise is not None:
+                sc = sc_noise
             # Không vẽ tâm/bán kính cụm KMeans khi đang hiển thị DBSCAN để tránh gây nhầm lẫn
             # (có thể bổ sung sau nếu cần tâm DBSCAN theo centroid)
         except Exception as e:
