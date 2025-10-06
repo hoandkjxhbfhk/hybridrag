@@ -3,7 +3,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from sklearn.cluster import KMeans
@@ -35,6 +35,129 @@ def compute_kmeans(doc_matrix: np.ndarray, k: int, seed: int = 42) -> (np.ndarra
     labels = km.fit_predict(doc_matrix)
     centers = km.cluster_centers_.astype(np.float32)
     return centers, labels
+
+
+def visualize_clusters_2d(
+    doc_matrix: np.ndarray,
+    labels: np.ndarray,
+    centers: np.ndarray,
+    method: str,
+    out_path: Path,
+    title: str,
+    max_points: int = 5000,
+    seed: int = 42,
+) -> None:
+    """Vẽ trực quan các cụm trong 2D bằng PCA hoặc t-SNE và lưu hình.
+
+    - doc_matrix: (N, D) đã chuẩn hoá L2 (không bắt buộc)
+    - labels: (N,) nhãn cụm
+    - centers: (K, D) tâm cụm
+    - method: "pca" hoặc "tsne"
+    - out_path: đường dẫn ảnh đầu ra (.png)
+    - max_points: giới hạn số điểm để vẽ (lấy mẫu nếu N lớn)
+    - seed: random state
+    """
+    N = int(doc_matrix.shape[0])
+    K = int(centers.shape[0]) if centers is not None else 0
+    if N <= 0 or K <= 0:
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Lấy mẫu theo tỉ lệ cụm để đảm bảo mỗi cụm đều có điểm
+    rng = np.random.default_rng(seed)
+    max_points = int(max(100, max_points))
+    unique_labels = np.arange(K)
+    counts = np.bincount(labels, minlength=K).astype(int)
+
+    if N > max_points:
+        # Phân bổ quota cho mỗi cụm theo tỉ lệ kích thước, tối thiểu 5 điểm/cụm nếu có đủ
+        quotas = np.maximum(1, np.floor(max_points * (counts / float(N))).astype(int))
+        # Điều chỉnh tổng quota về đúng max_points
+        diff = max_points - int(quotas.sum())
+        if diff > 0:
+            # phân phát phần dư cho các cụm lớn nhất
+            order = np.argsort(-counts)
+            for i in order:
+                if diff == 0:
+                    break
+                quotas[i] += 1
+                diff -= 1
+        elif diff < 0:
+            order = np.argsort(counts)
+            for i in order:
+                if diff == 0:
+                    break
+                if quotas[i] > 1:
+                    quotas[i] -= 1
+                    diff += 1
+
+        sample_indices: List[int] = []
+        for c in unique_labels:
+            idxs_c = np.where(labels == c)[0]
+            if idxs_c.size == 0:
+                continue
+            take = int(min(quotas[c], idxs_c.size))
+            chosen = rng.choice(idxs_c, size=take, replace=False)
+            sample_indices.extend(chosen.tolist())
+        if not sample_indices:
+            sample_indices = rng.choice(np.arange(N), size=min(max_points, N), replace=False).tolist()
+        sample_indices = np.array(sample_indices, dtype=int)
+    else:
+        sample_indices = np.arange(N, dtype=int)
+
+    X = doc_matrix[sample_indices]
+    y = labels[sample_indices]
+
+    # Import lười để tránh phụ thuộc khi không cần vẽ
+    import matplotlib  # type: ignore
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # type: ignore
+
+    if method.lower() == "pca":
+        from sklearn.decomposition import PCA  # type: ignore
+        pca = PCA(n_components=2, random_state=seed)
+        X2 = pca.fit_transform(X)
+        centers2 = pca.transform(centers) if centers is not None else None
+    else:
+        from sklearn.manifold import TSNE  # type: ignore
+        concat = np.vstack([X, centers]) if centers is not None else X
+        # perplexity < n_samples/3, chọn tự động dựa trên cỡ mẫu
+        n_s = int(concat.shape[0])
+        if n_s <= 5:
+            perplexity = max(2, n_s - 1)
+        else:
+            perplexity = max(5, min(30, (n_s - 1) // 3))
+        tsne = TSNE(
+            n_components=2,
+            perplexity=float(perplexity),
+            learning_rate="auto",
+            init="pca",
+            n_iter=1000,
+            random_state=seed,
+            verbose=0,
+        )
+        Z = tsne.fit_transform(concat)
+        if centers is not None:
+            X2 = Z[: X.shape[0]]
+            centers2 = Z[X.shape[0] :]
+        else:
+            X2 = Z
+            centers2 = None
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
+    sc = ax.scatter(X2[:, 0], X2[:, 1], c=y, s=6, cmap="tab20", alpha=0.7, linewidths=0)
+    if centers2 is not None:
+        ax.scatter(centers2[:, 0], centers2[:, 1], c="black", s=40, marker="x", linewidths=1.5, alpha=0.9)
+    ax.set_title(title)
+    ax.set_xlabel("dim-1")
+    ax.set_ylabel("dim-2")
+    # Chỉ hiển thị colorbar nếu số cụm nhỏ để tránh rối
+    if K <= 20:
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Cluster")
+    fig.tight_layout()
+    fig.savefig(str(out_path))
+    plt.close(fig)
 
 
 def mor_pre_score(vec: np.ndarray, centers: np.ndarray, labels: np.ndarray) -> float:
@@ -151,6 +274,11 @@ def compute_mor_pre_weights_all(
     q_texts: List[str],
     indices_base: Path,
     kmeans_k: int,
+    viz: bool = False,
+    viz_method: str = "pca",
+    viz_outdir: Optional[Path] = None,
+    viz_max_points: int = 5000,
+    viz_seed: int = 42,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-pre cho MỌI run dense theo không gian của CHÍNH run đó.
 
@@ -218,6 +346,24 @@ def compute_mor_pre_weights_all(
         # KMeans trong không gian của run
         centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
 
+        # Vẽ cụm nếu được yêu cầu
+        if viz and viz_outdir is not None:
+            try:
+                out_img = viz_outdir / f"{rn}_clusters_{viz_method.lower()}.png"
+                title = f"{rn} clusters K={centers.shape[0]} ({viz_method.upper()})"
+                visualize_clusters_2d(
+                    doc_matrix=doc_matrix,
+                    labels=labels,
+                    centers=centers,
+                    method=viz_method,
+                    out_path=out_img,
+                    title=title,
+                    max_points=viz_max_points,
+                    seed=viz_seed,
+                )
+            except Exception as e:  # chỉ log, không làm hỏng flow tính weight
+                print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
+
         # Encode queries theo model của run
         alias = dense_alias_from_run(rn)
         model_name = get_model_name(alias)
@@ -267,6 +413,11 @@ def compute_mor_post_weights(
     a: float,
     b: float,
     c: float,
+    viz: bool = False,
+    viz_method: str = "pca",
+    viz_outdir: Optional[Path] = None,
+    viz_max_points: int = 5000,
+    viz_seed: int = 42,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-post cho tất cả run dense theo không gian của CHÍNH run đó.
 
@@ -348,6 +499,24 @@ def compute_mor_post_weights(
         # KMeans trên không gian của chính run
         centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
 
+        # Vẽ cụm nếu được yêu cầu
+        if viz and viz_outdir is not None:
+            try:
+                out_img = viz_outdir / f"{rn}_clusters_{viz_method.lower()}.png"
+                title = f"{rn} clusters K={centers.shape[0]} ({viz_method.upper()})"
+                visualize_clusters_2d(
+                    doc_matrix=doc_matrix,
+                    labels=labels,
+                    centers=centers,
+                    method=viz_method,
+                    out_path=out_img,
+                    title=title,
+                    max_points=viz_max_points,
+                    seed=viz_seed,
+                )
+            except Exception as e:
+                print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
+
         # Encode queries theo model của run để tính V_pre(q)
         alias = dense_alias_from_run(rn)
         model_name = get_model_name(alias)
@@ -426,6 +595,11 @@ def compute_mor_post_entropy_weights(
     d: float,
     entropy_topk: int,
     entropy_tau: float,
+    viz: bool = False,
+    viz_method: str = "pca",
+    viz_outdir: Optional[Path] = None,
+    viz_max_points: int = 5000,
+    viz_seed: int = 42,
 ) -> Dict[str, Dict[str, float]]:
     """Giống compute_mor_post_weights nhưng trừ thêm d * entropy.
 
@@ -499,6 +673,24 @@ def compute_mor_post_entropy_weights(
 
         # KMeans trên không gian của chính run
         centers, labels = compute_kmeans(doc_matrix, k=int(max(1, min(kmeans_k, ntotal))), seed=42)
+
+        # Vẽ cụm nếu được yêu cầu
+        if viz and viz_outdir is not None:
+            try:
+                out_img = viz_outdir / f"{rn}_clusters_{viz_method.lower()}.png"
+                title = f"{rn} clusters K={centers.shape[0]} ({viz_method.upper()})"
+                visualize_clusters_2d(
+                    doc_matrix=doc_matrix,
+                    labels=labels,
+                    centers=centers,
+                    method=viz_method,
+                    out_path=out_img,
+                    title=title,
+                    max_points=viz_max_points,
+                    seed=viz_seed,
+                )
+            except Exception as e:
+                print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
 
         # Encode queries theo model của run để tính V_pre(q)
         alias = dense_alias_from_run(rn)
@@ -591,6 +783,12 @@ def main() -> None:
     parser.add_argument("--entropy-topk", type=int, default=10, help="Top-K docs for entropy calculation")
     parser.add_argument("--entropy-tau", type=float, default=1.0, help="Temperature for softmax in entropy calculation")
     parser.add_argument("--d", type=float, default=0.3, help="Coefficient for entropy term in post+entropy score")
+    # Tuỳ chọn vẽ cụm
+    parser.add_argument("--viz", action="store_true", help="Bật vẽ cụm 2D (PCA/t-SNE) cho mỗi run dense")
+    parser.add_argument("--viz-method", type=str, default="pca", choices=["pca", "tsne"], help="Phương pháp giảm chiều để vẽ")
+    parser.add_argument("--viz-out", type=str, default="viz", help="Thư mục xuất hình ảnh cụm")
+    parser.add_argument("--viz-max-points", type=int, default=5000, help="Giới hạn số điểm vẽ (lấy mẫu nếu vượt)")
+    parser.add_argument("--viz-seed", type=int, default=42, help="Random seed cho lấy mẫu và t-SNE/PCA")
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -614,6 +812,11 @@ def main() -> None:
             q_texts=q_texts,
             indices_base=idx_base,
             kmeans_k=args.kmeans_k,
+            viz=bool(args.viz),
+            viz_method=str(args.viz_method),
+            viz_outdir=Path(args.viz_out),
+            viz_max_points=int(args.viz_max_points),
+            viz_seed=int(args.viz_seed),
         )
         (out_dir / "mor_pre.json").write_text(json.dumps(weights_pre, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-pre weights to {out_dir / 'mor_pre.json'}")
@@ -630,6 +833,11 @@ def main() -> None:
             a=args.a,
             b=args.b,
             c=args.c,
+            viz=bool(args.viz),
+            viz_method=str(args.viz_method),
+            viz_outdir=Path(args.viz_out),
+            viz_max_points=int(args.viz_max_points),
+            viz_seed=int(args.viz_seed),
         )
         (out_dir / "mor_post.json").write_text(json.dumps(weights_post, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post weights to {out_dir / 'mor_post.json'}")
@@ -660,6 +868,11 @@ def main() -> None:
             d=args.d,
             entropy_topk=args.entropy_topk,
             entropy_tau=args.entropy_tau,
+            viz=bool(args.viz),
+            viz_method=str(args.viz_method),
+            viz_outdir=Path(args.viz_out),
+            viz_max_points=int(args.viz_max_points),
+            viz_seed=int(args.viz_seed),
         )
         (out_dir / "mor_post_entropy.json").write_text(json.dumps(weights_post_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post+Entropy weights to {out_dir / 'mor_post_entropy.json'}")
