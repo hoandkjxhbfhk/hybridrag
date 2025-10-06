@@ -880,3 +880,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+#python3 scripts/05_compute_weights_mor.py --mode pre --indices indices --runs runs --queries data/beir/queries.jsonl --viz --viz-method pca --viz-out viz --viz-max-points 4000
