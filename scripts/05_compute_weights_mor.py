@@ -46,6 +46,9 @@ def visualize_clusters_2d(
     title: str,
     max_points: int = 5000,
     seed: int = 42,
+    dbscan: bool = False,
+    dbscan_eps: float = 0.5,
+    dbscan_min_samples: int = 5,
 ) -> None:
     """Vẽ trực quan các cụm trong 2D bằng PCA hoặc t-SNE và lưu hình.
 
@@ -146,41 +149,94 @@ def visualize_clusters_2d(
             centers2 = None
 
     fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
-    sc = ax.scatter(X2[:, 0], X2[:, 1], c=y, s=6, cmap="tab20", alpha=0.7, linewidths=0)
-    if centers2 is not None:
-        ax.scatter(centers2[:, 0], centers2[:, 1], c="black", s=40, marker="x", linewidths=1.5, alpha=0.9)
-        # Vẽ vòng tròn cho mỗi cụm dựa trên bán kính phân vị khoảng cách tới tâm
+
+    sc = None
+    if dbscan:
+        # Phân cụm DBSCAN trên không gian 2D đã chiếu
         try:
-            from matplotlib.patches import Circle  # type: ignore
-            for c in range(K):
-                pts = X2[y == c]
-                if pts.shape[0] < 2:
-                    continue
-                center_xy = centers2[c]
-                dists = np.linalg.norm(pts - center_xy[None, :], axis=1)
-                if dists.size == 0:
-                    continue
-                # dùng phân vị 0.8 để bao phủ phần lớn điểm, tránh nhiễu outlier
-                r = float(np.quantile(dists, 0.8))
-                if r <= 0:
-                    continue
-                circ = Circle(
-                    (float(center_xy[0]), float(center_xy[1])),
-                    r,
-                    edgecolor="red",
-                    facecolor="none",
-                    linewidth=0.8,
-                    alpha=0.7,
+            from sklearn.cluster import DBSCAN  # type: ignore
+            db = DBSCAN(eps=float(dbscan_eps), min_samples=int(dbscan_min_samples))
+            db_labels = db.fit_predict(X2)
+
+            mask_noise = (db_labels == -1)
+            # Plot noise trước (xám nhạt)
+            if np.any(mask_noise):
+                ax.scatter(
+                    X2[mask_noise, 0],
+                    X2[mask_noise, 1],
+                    c="lightgray",
+                    s=5,
+                    alpha=0.5,
+                    linewidths=0,
+                    label="noise",
                 )
-                ax.add_patch(circ)
+            # Plot các cụm DBSCAN (>=0)
+            if np.any(~mask_noise):
+                sc = ax.scatter(
+                    X2[~mask_noise, 0],
+                    X2[~mask_noise, 1],
+                    c=db_labels[~mask_noise],
+                    s=6,
+                    cmap="tab20",
+                    alpha=0.8,
+                    linewidths=0,
+                )
+            # Không vẽ tâm/bán kính cụm KMeans khi đang hiển thị DBSCAN để tránh gây nhầm lẫn
+            # (có thể bổ sung sau nếu cần tâm DBSCAN theo centroid)
         except Exception as e:
-            print(f"[viz] Bỏ qua vòng tròn cụm do lỗi: {e}")
+            print(f"[viz] Bỏ qua DBSCAN do lỗi: {e}")
+            sc = ax.scatter(X2[:, 0], X2[:, 1], c=y, s=6, cmap="tab20", alpha=0.7, linewidths=0)
+            if centers2 is not None:
+                ax.scatter(centers2[:, 0], centers2[:, 1], c="black", s=40, marker="x", linewidths=1.5, alpha=0.9)
+    else:
+        # Mặc định tô màu theo nhãn KMeans và vẽ tâm + vòng tròn cụm
+        sc = ax.scatter(X2[:, 0], X2[:, 1], c=y, s=6, cmap="tab20", alpha=0.7, linewidths=0)
+        if centers2 is not None:
+            ax.scatter(centers2[:, 0], centers2[:, 1], c="black", s=40, marker="x", linewidths=1.5, alpha=0.9)
+            # Vẽ vòng tròn cho mỗi cụm dựa trên bán kính phân vị khoảng cách tới tâm
+            try:
+                from matplotlib.patches import Circle  # type: ignore
+                for c in range(K):
+                    pts = X2[y == c]
+                    if pts.shape[0] < 2:
+                        continue
+                    center_xy = centers2[c]
+                    dists = np.linalg.norm(pts - center_xy[None, :], axis=1)
+                    if dists.size == 0:
+                        continue
+                    # dùng phân vị 0.8 để bao phủ phần lớn điểm, tránh nhiễu outlier
+                    r = float(np.quantile(dists, 0.8))
+                    if r <= 0:
+                        continue
+                    circ = Circle(
+                        (float(center_xy[0]), float(center_xy[1])),
+                        r,
+                        edgecolor="red",
+                        facecolor="none",
+                        linewidth=0.8,
+                        alpha=0.7,
+                    )
+                    ax.add_patch(circ)
+            except Exception as e:
+                print(f"[viz] Bỏ qua vòng tròn cụm do lỗi: {e}")
+
     ax.set_title(title)
     ax.set_xlabel("dim-1")
     ax.set_ylabel("dim-2")
     # Chỉ hiển thị colorbar nếu số cụm nhỏ để tránh rối
-    if K <= 20:
-        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Cluster")
+    if sc is not None:
+        show_bar = True
+        if dbscan:
+            # số cụm DBSCAN (loại bỏ noise -1)
+            try:
+                uniq = np.unique(db_labels[db_labels >= 0])
+                show_bar = uniq.size <= 20
+            except Exception:
+                show_bar = True
+        else:
+            show_bar = K <= 20
+        if show_bar:
+            plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="Cluster")
     fig.tight_layout()
     fig.savefig(str(out_path))
     plt.close(fig)
@@ -305,6 +361,9 @@ def compute_mor_pre_weights_all(
     viz_outdir: Optional[Path] = None,
     viz_max_points: int = 5000,
     viz_seed: int = 42,
+    viz_dbscan: bool = False,
+    viz_dbscan_eps: float = 0.5,
+    viz_dbscan_min_samples: int = 5,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-pre cho MỌI run dense theo không gian của CHÍNH run đó.
 
@@ -386,6 +445,9 @@ def compute_mor_pre_weights_all(
                     title=title,
                     max_points=viz_max_points,
                     seed=viz_seed,
+                    dbscan=viz_dbscan,
+                    dbscan_eps=viz_dbscan_eps,
+                    dbscan_min_samples=viz_dbscan_min_samples,
                 )
             except Exception as e:  # chỉ log, không làm hỏng flow tính weight
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -444,6 +506,9 @@ def compute_mor_post_weights(
     viz_outdir: Optional[Path] = None,
     viz_max_points: int = 5000,
     viz_seed: int = 42,
+    viz_dbscan: bool = False,
+    viz_dbscan_eps: float = 0.5,
+    viz_dbscan_min_samples: int = 5,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-post cho tất cả run dense theo không gian của CHÍNH run đó.
 
@@ -539,6 +604,9 @@ def compute_mor_post_weights(
                     title=title,
                     max_points=viz_max_points,
                     seed=viz_seed,
+                    dbscan=viz_dbscan,
+                    dbscan_eps=viz_dbscan_eps,
+                    dbscan_min_samples=viz_dbscan_min_samples,
                 )
             except Exception as e:
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -626,6 +694,9 @@ def compute_mor_post_entropy_weights(
     viz_outdir: Optional[Path] = None,
     viz_max_points: int = 5000,
     viz_seed: int = 42,
+    viz_dbscan: bool = False,
+    viz_dbscan_eps: float = 0.5,
+    viz_dbscan_min_samples: int = 5,
 ) -> Dict[str, Dict[str, float]]:
     """Giống compute_mor_post_weights nhưng trừ thêm d * entropy.
 
@@ -714,6 +785,9 @@ def compute_mor_post_entropy_weights(
                     title=title,
                     max_points=viz_max_points,
                     seed=viz_seed,
+                    dbscan=viz_dbscan,
+                    dbscan_eps=viz_dbscan_eps,
+                    dbscan_min_samples=viz_dbscan_min_samples,
                 )
             except Exception as e:
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -815,6 +889,9 @@ def main() -> None:
     parser.add_argument("--viz-out", type=str, default="viz", help="Thư mục xuất hình ảnh cụm")
     parser.add_argument("--viz-max-points", type=int, default=5000, help="Giới hạn số điểm vẽ (lấy mẫu nếu vượt)")
     parser.add_argument("--viz-seed", type=int, default=42, help="Random seed cho lấy mẫu và t-SNE/PCA")
+    parser.add_argument("--viz-dbscan", action="store_true", help="Phân cụm DBSCAN trên không gian 2D đã chiếu và plot")
+    parser.add_argument("--viz-dbscan-eps", type=float, default=0.5, help="eps cho DBSCAN trên 2D")
+    parser.add_argument("--viz-dbscan-min-samples", type=int, default=5, help="min_samples cho DBSCAN trên 2D")
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -843,6 +920,9 @@ def main() -> None:
             viz_outdir=Path(args.viz_out),
             viz_max_points=int(args.viz_max_points),
             viz_seed=int(args.viz_seed),
+            viz_dbscan=bool(args.viz_dbscan),
+            viz_dbscan_eps=float(args.viz_dbscan_eps),
+            viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
         )
         (out_dir / "mor_pre.json").write_text(json.dumps(weights_pre, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-pre weights to {out_dir / 'mor_pre.json'}")
@@ -864,6 +944,9 @@ def main() -> None:
             viz_outdir=Path(args.viz_out),
             viz_max_points=int(args.viz_max_points),
             viz_seed=int(args.viz_seed),
+            viz_dbscan=bool(args.viz_dbscan),
+            viz_dbscan_eps=float(args.viz_dbscan_eps),
+            viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
         )
         (out_dir / "mor_post.json").write_text(json.dumps(weights_post, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post weights to {out_dir / 'mor_post.json'}")
@@ -899,6 +982,9 @@ def main() -> None:
             viz_outdir=Path(args.viz_out),
             viz_max_points=int(args.viz_max_points),
             viz_seed=int(args.viz_seed),
+            viz_dbscan=bool(args.viz_dbscan),
+            viz_dbscan_eps=float(args.viz_dbscan_eps),
+            viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
         )
         (out_dir / "mor_post_entropy.json").write_text(json.dumps(weights_post_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post+Entropy weights to {out_dir / 'mor_post_entropy.json'}")
