@@ -149,6 +149,32 @@ def visualize_clusters_2d(
     sc = ax.scatter(X2[:, 0], X2[:, 1], c=y, s=6, cmap="tab20", alpha=0.7, linewidths=0)
     if centers2 is not None:
         ax.scatter(centers2[:, 0], centers2[:, 1], c="black", s=40, marker="x", linewidths=1.5, alpha=0.9)
+        # Vẽ vòng tròn cho mỗi cụm dựa trên bán kính phân vị khoảng cách tới tâm
+        try:
+            from matplotlib.patches import Circle  # type: ignore
+            for c in range(K):
+                pts = X2[y == c]
+                if pts.shape[0] < 2:
+                    continue
+                center_xy = centers2[c]
+                dists = np.linalg.norm(pts - center_xy[None, :], axis=1)
+                if dists.size == 0:
+                    continue
+                # dùng phân vị 0.8 để bao phủ phần lớn điểm, tránh nhiễu outlier
+                r = float(np.quantile(dists, 0.8))
+                if r <= 0:
+                    continue
+                circ = Circle(
+                    (float(center_xy[0]), float(center_xy[1])),
+                    r,
+                    edgecolor="red",
+                    facecolor="none",
+                    linewidth=0.8,
+                    alpha=0.7,
+                )
+                ax.add_patch(circ)
+        except Exception as e:
+            print(f"[viz] Bỏ qua vòng tròn cụm do lỗi: {e}")
     ax.set_title(title)
     ax.set_xlabel("dim-1")
     ax.set_ylabel("dim-2")
