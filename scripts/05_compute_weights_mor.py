@@ -994,3 +994,4 @@ if __name__ == "__main__":
     main()
 
 #python3 scripts/05_compute_weights_mor.py --mode pre --indices indices --runs runs --queries data/beir/queries.jsonl --viz --viz-method pca --viz-out viz --viz-max-points 4000
+#python3 scripts/05_compute_weights_mor.py --mode pre --indices indices --runs runs --queries data/beir/queries.jsonl --viz --viz-method tsne --viz-dbscan --viz-dbscan-eps 0.7 --viz-dbscan-min-samples 8 --viz-out viz_tsne_dbscan
