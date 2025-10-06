@@ -131,15 +131,26 @@ def visualize_clusters_2d(
             perplexity = max(2, n_s - 1)
         else:
             perplexity = max(5, min(30, (n_s - 1) // 3))
-        tsne = TSNE(
-            n_components=2,
-            perplexity=float(perplexity),
-            learning_rate="auto",
-            init="pca",
-            n_iter=1000,
-            random_state=seed,
-            verbose=0,
-        )
+        try:
+            tsne = TSNE(
+                n_components=2,
+                perplexity=float(perplexity),
+                learning_rate="auto",
+                init="pca",
+                n_iter=1000,
+                random_state=seed,
+                verbose=0,
+            )
+        except TypeError:
+            # Tương thích phiên bản scikit-learn cũ (không hỗ trợ learning_rate="auto" hoặc n_iter trong __init__)
+            tsne = TSNE(
+                n_components=2,
+                perplexity=float(perplexity),
+                learning_rate=200.0,
+                init="pca",
+                random_state=seed,
+                verbose=0,
+            )
         Z = tsne.fit_transform(concat)
         if centers is not None:
             X2 = Z[: X.shape[0]]
