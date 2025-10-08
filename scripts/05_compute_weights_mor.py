@@ -190,31 +190,47 @@ def visualize_clusters_2d(
                 )
             # Plot các cụm DBSCAN (>=0)
             if np.any(~mask_noise):
-                # Nếu có giới hạn số điểm mỗi cụm, tách phần dư thành các cụm phụ mới
+                # Nếu có giới hạn số điểm mỗi cụm, tách phần dư thành các cụm con bằng KMeans 2D để tách rõ
                 if dbscan_max_points_per_cluster is not None and dbscan_max_points_per_cluster > 0:
-                    rng2 = np.random.default_rng(seed)
+                    cap = int(dbscan_max_points_per_cluster)
                     uniq = np.array(sorted([int(v) for v in np.unique(db_labels) if v >= 0]), dtype=int)
                     new_label_counter = 0
                     points_idx_list: List[int] = []
                     labels_plot_list: List[int] = []
-                    cap = int(dbscan_max_points_per_cluster)
+
+                    def split_indices_with_kmeans(indices: np.ndarray) -> List[np.ndarray]:
+                        # Chia indices thành nhiều phần bằng KMeans sao cho mỗi phần <= cap (đệ quy nếu cần)
+                        if indices.size <= cap:
+                            return [indices]
+                        # số cụm cần thiết
+                        n_sub = int(np.ceil(indices.size / float(cap)))
+                        n_sub = int(max(2, min(indices.size, n_sub)))
+                        # KMeans trên không gian 2D để tạo cụm con rõ ràng
+                        coords = X2[indices]
+                        km2 = KMeans(n_clusters=n_sub, n_init=10, random_state=seed)
+                        sub_labels = km2.fit_predict(coords)
+                        parts: List[np.ndarray] = []
+                        for s in range(n_sub):
+                            part = indices[sub_labels == s]
+                            if part.size == 0:
+                                continue
+                            # Nếu phần vẫn vượt cap, đệ quy tiếp
+                            if part.size > cap:
+                                parts.extend(split_indices_with_kmeans(part))
+                            else:
+                                parts.append(part)
+                        return parts
+
                     for cl in uniq:
                         idxs = np.where(db_labels == cl)[0]
                         if idxs.size == 0:
                             continue
-                        if idxs.size <= cap:
-                            points_idx_list.extend(idxs.tolist())
-                            labels_plot_list.extend([new_label_counter] * int(idxs.size))
+                        parts = split_indices_with_kmeans(idxs)
+                        for part in parts:
+                            points_idx_list.extend(part.tolist())
+                            labels_plot_list.extend([new_label_counter] * int(part.size))
                             new_label_counter += 1
-                        else:
-                            perm = rng2.permutation(idxs)
-                            for start in range(0, int(perm.size), cap):
-                                chunk = perm[start : start + cap]
-                                if chunk.size == 0:
-                                    continue
-                                points_idx_list.extend(chunk.tolist())
-                                labels_plot_list.extend([new_label_counter] * int(chunk.size))
-                                new_label_counter += 1
+
                     if points_idx_list:
                         pts = np.array(points_idx_list, dtype=int)
                         labels_plot = np.array(labels_plot_list, dtype=int)
