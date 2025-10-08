@@ -49,6 +49,7 @@ def visualize_clusters_2d(
     dbscan: bool = False,
     dbscan_eps: float = 0.5,
     dbscan_min_samples: int = 5,
+    dbscan_max_points_per_cluster: Optional[int] = None,
 ) -> None:
     """Vẽ trực quan các cụm trong 2D bằng PCA hoặc t-SNE và lưu hình.
 
@@ -162,6 +163,7 @@ def visualize_clusters_2d(
     fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
 
     sc = None
+    dbscan_num_plotted_clusters: Optional[int] = None
     if dbscan:
         # Phân cụm DBSCAN trên không gian 2D đã chiếu
         try:
@@ -188,15 +190,58 @@ def visualize_clusters_2d(
                 )
             # Plot các cụm DBSCAN (>=0)
             if np.any(~mask_noise):
-                sc = ax.scatter(
-                    X2[~mask_noise, 0],
-                    X2[~mask_noise, 1],
-                    c=db_labels[~mask_noise],
-                    s=6,
-                    cmap="tab20",
-                    alpha=0.8,
-                    linewidths=0,
-                )
+                # Nếu có giới hạn số điểm mỗi cụm, tách phần dư thành các cụm phụ mới
+                if dbscan_max_points_per_cluster is not None and dbscan_max_points_per_cluster > 0:
+                    rng2 = np.random.default_rng(seed)
+                    uniq = np.array(sorted([int(v) for v in np.unique(db_labels) if v >= 0]), dtype=int)
+                    new_label_counter = 0
+                    points_idx_list: List[int] = []
+                    labels_plot_list: List[int] = []
+                    cap = int(dbscan_max_points_per_cluster)
+                    for cl in uniq:
+                        idxs = np.where(db_labels == cl)[0]
+                        if idxs.size == 0:
+                            continue
+                        if idxs.size <= cap:
+                            points_idx_list.extend(idxs.tolist())
+                            labels_plot_list.extend([new_label_counter] * int(idxs.size))
+                            new_label_counter += 1
+                        else:
+                            perm = rng2.permutation(idxs)
+                            for start in range(0, int(perm.size), cap):
+                                chunk = perm[start : start + cap]
+                                if chunk.size == 0:
+                                    continue
+                                points_idx_list.extend(chunk.tolist())
+                                labels_plot_list.extend([new_label_counter] * int(chunk.size))
+                                new_label_counter += 1
+                    if points_idx_list:
+                        pts = np.array(points_idx_list, dtype=int)
+                        labels_plot = np.array(labels_plot_list, dtype=int)
+                        dbscan_num_plotted_clusters = int(np.unique(labels_plot).size)
+                        sc = ax.scatter(
+                            X2[pts, 0],
+                            X2[pts, 1],
+                            c=labels_plot,
+                            s=6,
+                            cmap="tab20",
+                            alpha=0.8,
+                            linewidths=0,
+                        )
+                else:
+                    sc = ax.scatter(
+                        X2[~mask_noise, 0],
+                        X2[~mask_noise, 1],
+                        c=db_labels[~mask_noise],
+                        s=6,
+                        cmap="tab20",
+                        alpha=0.8,
+                        linewidths=0,
+                    )
+                    try:
+                        dbscan_num_plotted_clusters = int(np.unique(db_labels[~mask_noise]).size)
+                    except Exception:
+                        dbscan_num_plotted_clusters = None
             # Nếu tất cả là noise, dùng scatter noise làm sc để đảm bảo có điểm hiển thị
             if sc is None and sc_noise is not None:
                 sc = sc_noise
@@ -246,10 +291,12 @@ def visualize_clusters_2d(
     if sc is not None:
         show_bar = True
         if dbscan:
-            # số cụm DBSCAN (loại bỏ noise -1)
             try:
-                uniq = np.unique(db_labels[db_labels >= 0])
-                show_bar = uniq.size <= 20
+                if dbscan_num_plotted_clusters is not None:
+                    show_bar = dbscan_num_plotted_clusters <= 20
+                else:
+                    uniq = np.unique(db_labels[db_labels >= 0])
+                    show_bar = uniq.size <= 20
             except Exception:
                 show_bar = True
         else:
@@ -383,6 +430,7 @@ def compute_mor_pre_weights_all(
     viz_dbscan: bool = False,
     viz_dbscan_eps: float = 0.5,
     viz_dbscan_min_samples: int = 5,
+    viz_dbscan_max_points_per_cluster: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-pre cho MỌI run dense theo không gian của CHÍNH run đó.
 
@@ -467,6 +515,7 @@ def compute_mor_pre_weights_all(
                     dbscan=viz_dbscan,
                     dbscan_eps=viz_dbscan_eps,
                     dbscan_min_samples=viz_dbscan_min_samples,
+                    dbscan_max_points_per_cluster=viz_dbscan_max_points_per_cluster,
                 )
             except Exception as e:  # chỉ log, không làm hỏng flow tính weight
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -528,6 +577,7 @@ def compute_mor_post_weights(
     viz_dbscan: bool = False,
     viz_dbscan_eps: float = 0.5,
     viz_dbscan_min_samples: int = 5,
+    viz_dbscan_max_points_per_cluster: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Tính MoR-post cho tất cả run dense theo không gian của CHÍNH run đó.
 
@@ -626,6 +676,7 @@ def compute_mor_post_weights(
                     dbscan=viz_dbscan,
                     dbscan_eps=viz_dbscan_eps,
                     dbscan_min_samples=viz_dbscan_min_samples,
+                    dbscan_max_points_per_cluster=viz_dbscan_max_points_per_cluster,
                 )
             except Exception as e:
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -716,6 +767,7 @@ def compute_mor_post_entropy_weights(
     viz_dbscan: bool = False,
     viz_dbscan_eps: float = 0.5,
     viz_dbscan_min_samples: int = 5,
+    viz_dbscan_max_points_per_cluster: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Giống compute_mor_post_weights nhưng trừ thêm d * entropy.
 
@@ -807,6 +859,7 @@ def compute_mor_post_entropy_weights(
                     dbscan=viz_dbscan,
                     dbscan_eps=viz_dbscan_eps,
                     dbscan_min_samples=viz_dbscan_min_samples,
+                    dbscan_max_points_per_cluster=viz_dbscan_max_points_per_cluster,
                 )
             except Exception as e:
                 print(f"[viz] Bỏ qua vẽ cho {rn} do lỗi: {e}")
@@ -911,6 +964,7 @@ def main() -> None:
     parser.add_argument("--viz-dbscan", action="store_true", help="Phân cụm DBSCAN trên không gian 2D đã chiếu và plot")
     parser.add_argument("--viz-dbscan-eps", type=float, default=0.5, help="eps cho DBSCAN trên 2D")
     parser.add_argument("--viz-dbscan-min-samples", type=int, default=5, help="min_samples cho DBSCAN trên 2D")
+    parser.add_argument("--viz-dbscan-max-points-per-cluster", type=int, default=0, help="Giới hạn số điểm mỗi cụm DBSCAN (0 = không giới hạn)")
     args = parser.parse_args()
 
     queries_path = Path(args.queries)
@@ -942,6 +996,7 @@ def main() -> None:
             viz_dbscan=bool(args.viz_dbscan),
             viz_dbscan_eps=float(args.viz_dbscan_eps),
             viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
+            viz_dbscan_max_points_per_cluster=(int(args.viz_dbscan_max_points_per_cluster) if int(args.viz_dbscan_max_points_per_cluster) > 0 else None),
         )
         (out_dir / "mor_pre.json").write_text(json.dumps(weights_pre, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-pre weights to {out_dir / 'mor_pre.json'}")
@@ -966,6 +1021,7 @@ def main() -> None:
             viz_dbscan=bool(args.viz_dbscan),
             viz_dbscan_eps=float(args.viz_dbscan_eps),
             viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
+            viz_dbscan_max_points_per_cluster=(int(args.viz_dbscan_max_points_per_cluster) if int(args.viz_dbscan_max_points_per_cluster) > 0 else None),
         )
         (out_dir / "mor_post.json").write_text(json.dumps(weights_post, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post weights to {out_dir / 'mor_post.json'}")
@@ -1004,6 +1060,7 @@ def main() -> None:
             viz_dbscan=bool(args.viz_dbscan),
             viz_dbscan_eps=float(args.viz_dbscan_eps),
             viz_dbscan_min_samples=int(args.viz_dbscan_min_samples),
+            viz_dbscan_max_points_per_cluster=(int(args.viz_dbscan_max_points_per_cluster) if int(args.viz_dbscan_max_points_per_cluster) > 0 else None),
         )
         (out_dir / "mor_post_entropy.json").write_text(json.dumps(weights_post_entropy, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Wrote MoR-post+Entropy weights to {out_dir / 'mor_post_entropy.json'}")
